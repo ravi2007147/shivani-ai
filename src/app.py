@@ -611,33 +611,24 @@ if not all_profiles:
 st.session_state.all_profiles = all_profiles
 
 # Profile selection at the top
-col_profile1, col_profile2 = st.columns([2, 1])
-
-with col_profile1:
-    if all_profiles:
-        profile_options = {p.get('name'): p.get('id') for p in all_profiles}
-        profile_names = list(profile_options.keys())
-        
-        # Multi-select for profiles
-        selected_profile_names = st.multiselect(
-            "👤 Select Profile(s)",
-            options=profile_names,
-            default=[profile_names[0]] if profile_names else [],
-            help="Select one or more profiles. Queries will search across all selected profiles' knowledge bases."
-        )
-        
-        # Convert names to IDs
-        st.session_state.selected_profiles = [
-            profile_options[name] for name in selected_profile_names
-        ] if selected_profile_names else [all_profiles[0].get('id')]
-    else:
-        st.session_state.selected_profiles = ["default"]
-
-with col_profile2:
-    st.markdown("")
-    st.markdown("")
-    if st.button("👤 Manage Profiles"):
-        st.switch_page("pages/2_👤_Manage_Profiles.py")
+if all_profiles:
+    profile_options = {p.get('name'): p.get('id') for p in all_profiles}
+    profile_names = list(profile_options.keys())
+    
+    # Multi-select for profiles
+    selected_profile_names = st.multiselect(
+        "👤 Select Profile(s)",
+        options=profile_names,
+        default=[profile_names[0]] if profile_names else [],
+        help="Select one or more profiles. Queries will search across all selected profiles' knowledge bases."
+    )
+    
+    # Convert names to IDs
+    st.session_state.selected_profiles = [
+        profile_options[name] for name in selected_profile_names
+    ] if selected_profile_names else [all_profiles[0].get('id')]
+else:
+    st.session_state.selected_profiles = ["default"]
 
 st.markdown("---")
 
