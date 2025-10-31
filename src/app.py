@@ -5,9 +5,11 @@ import os
 import shutil
 import sys
 import time
+import json
 from pathlib import Path
 
 from langchain_ollama import OllamaLLM
+from streamlit.components.v1 import html
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -824,7 +826,7 @@ with tab1:
     # Input method selection
     input_method = st.radio(
         "Select input method:",
-        ["Manual Text Entry", "Upload PDF"],
+        ["Manual Text Entry", "Structured Text Entry", "Upload PDF"],
         horizontal=True
     )
     
@@ -839,6 +841,163 @@ with tab1:
             value=st.session_state.rag_text,
             placeholder="Enter your text here to create a knowledge base...\n\nExample:\n\nArtificial intelligence (AI) is transforming industries across the globe. Machine learning algorithms can process vast amounts of data to make predictions and decisions. Natural language processing enables computers to understand and generate human language..."
         )
+    elif input_method == "Structured Text Entry":
+        # Initialize structured data in session state if not exists
+        if 'structured_data' not in st.session_state:
+            st.session_state.structured_data = []
+        
+        st.markdown("### ✨ Structured Data Editor")
+        
+        # JSON Import section
+        with st.expander("📥 Import from JSON", expanded=False):
+            json_input_raw = st.text_area("Paste JSON here:", height=150, key="json_import_input", 
+                                         placeholder='{\n  "income": 75000,\n  "expenses": {\n    "mobile": 3000,\n    "school_fee": 10000\n  }\n}')
+            
+            col_import1, col_import2 = st.columns(2)
+            with col_import1:
+                if st.button("Load JSON", type="primary", use_container_width=True):
+                    if json_input_raw.strip():
+                        try:
+                            parsed_json = json.loads(json_input_raw)
+                            # Convert JSON to flat tree structure
+                            def json_to_tree(data, indent=0):
+                                result = []
+                                if isinstance(data, dict):
+                                    for key, value in data.items():
+                                        if isinstance(value, (dict, list)):
+                                            result.append({'key': key, 'value': '', 'indent': indent})
+                                            result.extend(json_to_tree(value, indent + 1))
+                                        else:
+                                            result.append({'key': key, 'value': str(value), 'indent': indent})
+                                elif isinstance(data, list):
+                                    for idx, item in enumerate(data):
+                                        result.append({'key': str(idx), 'value': str(item) if not isinstance(item, (dict, list)) else '', 'indent': indent})
+                                        if isinstance(item, (dict, list)):
+                                            result.extend(json_to_tree(item, indent + 1))
+                                return result
+                            
+                            st.session_state.structured_data = json_to_tree(parsed_json)
+                            st.success("JSON loaded successfully!")
+                            st.rerun()
+                        except json.JSONDecodeError as e:
+                            st.error(f"Invalid JSON: {str(e)}")
+                        except Exception as e:
+                            st.error(f"Error loading JSON: {str(e)}")
+                    else:
+                        st.warning("Please enter JSON data")
+            
+            with col_import2:
+                if st.button("Clear All", use_container_width=True):
+                    st.session_state.structured_data = []
+                    st.rerun()
+        
+        # Add new entry form
+        st.markdown("**Add New Field:**")
+        col_key, col_value, col_action = st.columns([2.5, 2.5, 1])
+        
+        with col_key:
+            new_key = st.text_input("Key", key="new_key_input", placeholder="e.g., income", label_visibility="collapsed")
+        
+        with col_value:
+            new_value = st.text_input("Value", key="new_value_input", placeholder="e.g., 75000", label_visibility="collapsed")
+        
+        with col_action:
+            if st.button("Add", type="primary", use_container_width=True):
+                if new_key:
+                    st.session_state.structured_data.append({
+                        'key': new_key,
+                        'value': new_value,
+                        'indent': 0
+                    })
+                    st.rerun()
+        
+        # Display tree structure
+        if st.session_state.structured_data:
+            st.markdown("---")
+            st.markdown("**Your Structured Data:**")
+            
+            for idx, entry in enumerate(st.session_state.structured_data):
+                indent = entry.get('indent', 0)
+                indent_margin = indent * 32
+                
+                # Check if item is collapsed
+                collapsed_key = f"collapsed_{idx}"
+                if collapsed_key not in st.session_state:
+                    st.session_state[collapsed_key] = False
+                
+                # Tree item display
+                col1, col2, col3, col4 = st.columns([0.3, 3, 2, 1])
+                
+                with col1:
+                    # Collapse/expand icon and folder icon
+                    expand_icon = "−" if not st.session_state[collapsed_key] else "+"
+                    icon = "📁" if not entry.get('value') else "📄"
+                    st.markdown(f"<div style='margin-left: {indent_margin}px; text-align: center; font-size: 16px; padding-top: 8px;'>{expand_icon} {icon}</div>", unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"**{entry['key']}**")
+                
+                with col3:
+                    if entry.get('value'):
+                        st.text(entry['value'])
+                    else:
+                        st.text("(nested)")
+                
+                with col4:
+                    col_controls = st.columns(4)
+                    with col_controls[0]:
+                        if st.button("⬆", key=f"u_{idx}", disabled=(idx == 0)):
+                            st.session_state.structured_data[idx], st.session_state.structured_data[idx-1] = \
+                                st.session_state.structured_data[idx-1], st.session_state.structured_data[idx]
+                            st.rerun()
+                    with col_controls[1]:
+                        if st.button("⬇", key=f"d_{idx}", disabled=(idx == len(st.session_state.structured_data) - 1)):
+                            st.session_state.structured_data[idx], st.session_state.structured_data[idx+1] = \
+                                st.session_state.structured_data[idx+1], st.session_state.structured_data[idx]
+                            st.rerun()
+                    with col_controls[2]:
+                        if st.button("→", key=f"r_{idx}"):
+                            st.session_state.structured_data[idx]['indent'] = indent + 1
+                            st.rerun()
+                    with col_controls[3]:
+                        if st.button("←", key=f"l_{idx}", disabled=(indent == 0)):
+                            st.session_state.structured_data[idx]['indent'] = max(0, indent - 1)
+                            st.rerun()
+            
+            # JSON Preview
+            with st.expander("📊 JSON Preview", expanded=True):
+                json_output = {}
+                stack = [json_output]
+                indent_levels = [0]
+                
+                for entry in st.session_state.structured_data:
+                    key = entry['key']
+                    value = entry.get('value', '')
+                    indent = entry.get('indent', 0)
+                    
+                    while len(indent_levels) > 1 and indent_levels[-1] >= indent:
+                        stack.pop()
+                        indent_levels.pop()
+                    
+                    if value:
+                        if value.lower() in ['true', 'false']:
+                            stack[-1][key] = value.lower() == 'true'
+                        else:
+                            try:
+                                stack[-1][key] = float(value) if '.' in value else int(value)
+                            except ValueError:
+                                stack[-1][key] = value
+                    else:
+                        stack[-1][key] = {}
+                        stack.append(stack[-1][key])
+                        indent_levels.append(indent)
+                
+                json_str = json.dumps(json_output, indent=2)
+                st.code(json_str, language="json")
+                rag_input = json_str
+        else:
+            st.info("Add your first field above to get started!")
+            rag_input = ""
     else:  # PDF Upload
         uploaded_file = st.file_uploader(
             "Choose a PDF file",
