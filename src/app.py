@@ -291,6 +291,8 @@ def create_knowledge_base_with_progress(
     ollama_base_url: str,
     profile_id: str = None,
     progress_callback=None,
+    title: str = None,
+    pdf_metadata: dict = None,
 ) -> tuple[bool, str, list]:
     """Create a new knowledge base from text with progress updates.
     
@@ -301,6 +303,8 @@ def create_knowledge_base_with_progress(
         ollama_base_url: Base URL for Ollama API
         profile_id: Profile ID to create KB under (None = use selected profile)
         progress_callback: Optional callback function(step, message) for progress updates
+        title: Optional title for the knowledge base
+        pdf_metadata: Optional PDF metadata dictionary (author, subject, etc.)
         
     Returns:
         Tuple of (success, message, progress_updates)
@@ -380,6 +384,8 @@ def create_knowledge_base_with_progress(
             persist_dir=persist_dir,
             text_preview=rag_input,
             chunk_count=approx_chunks,
+            title=title,
+            pdf_metadata=pdf_metadata,
         )
         
         # Add to active knowledge bases (don't replace existing ones)
@@ -806,12 +812,82 @@ with tab1:
     
     st.markdown("---")
     
-    rag_input = st.text_area(
-        "RAG Text Box",
-        height=500,
-        value=st.session_state.rag_text,
-        placeholder="Enter your text here to create a knowledge base...\n\nExample:\n\nArtificial intelligence (AI) is transforming industries across the globe. Machine learning algorithms can process vast amounts of data to make predictions and decisions. Natural language processing enables computers to understand and generate human language..."
+    # Input method selection
+    input_method = st.radio(
+        "Select input method:",
+        ["Manual Text Entry", "Upload PDF"],
+        horizontal=True
     )
+    
+    kb_title = None
+    kb_pdf_metadata = None
+    rag_input = ""
+    
+    if input_method == "Manual Text Entry":
+        rag_input = st.text_area(
+            "RAG Text Box",
+            height=500,
+            value=st.session_state.rag_text,
+            placeholder="Enter your text here to create a knowledge base...\n\nExample:\n\nArtificial intelligence (AI) is transforming industries across the globe. Machine learning algorithms can process vast amounts of data to make predictions and decisions. Natural language processing enables computers to understand and generate human language..."
+        )
+    else:  # PDF Upload
+        uploaded_file = st.file_uploader(
+            "Choose a PDF file",
+            type=["pdf"],
+            help="Upload a PDF document to extract text and create a knowledge base"
+        )
+        
+        if uploaded_file is not None:
+            # Optional title field for PDF uploads
+            kb_title = st.text_input(
+                "Knowledge Base Title (optional)",
+                placeholder="Enter a descriptive title for this knowledge base",
+                help="Optional: Add a custom title to help identify this knowledge base"
+            )
+            
+            # Process PDF button
+            if st.button("📄 Extract Text from PDF", type="secondary"):
+                try:
+                    with st.spinner("Extracting and processing PDF content..."):
+                        from src.utils.pdf_parser import process_pdf_content
+                        extracted_text, pdf_metadata = process_pdf_content(uploaded_file, return_metadata=True)
+                        
+                        if extracted_text:
+                            rag_input = extracted_text
+                            kb_pdf_metadata = pdf_metadata
+                            st.success(f"Successfully extracted {len(extracted_text)} characters from PDF")
+                            
+                            # Display metadata if available
+                            if pdf_metadata:
+                                st.info("PDF Metadata extracted:")
+                                metadata_col1, metadata_col2 = st.columns(2)
+                                with metadata_col1:
+                                    if pdf_metadata.get('Title'):
+                                        st.write(f"**Title:** {pdf_metadata['Title']}")
+                                    if pdf_metadata.get('Author'):
+                                        st.write(f"**Author:** {pdf_metadata['Author']}")
+                                    if pdf_metadata.get('Subject'):
+                                        st.write(f"**Subject:** {pdf_metadata['Subject']}")
+                                with metadata_col2:
+                                    if pdf_metadata.get('Producer'):
+                                        st.write(f"**Producer:** {pdf_metadata['Producer']}")
+                                    if pdf_metadata.get('Creator'):
+                                        st.write(f"**Creator:** {pdf_metadata['Creator']}")
+                            
+                            st.info("Text preview:")
+                            st.text_area(
+                                "Extracted Text Preview",
+                                value=extracted_text[:1000] + "..." if len(extracted_text) > 1000 else extracted_text,
+                                height=200,
+                                disabled=True
+                            )
+                        else:
+                            st.warning("No text could be extracted from the PDF file")
+                except ImportError as e:
+                    st.error(f"PDF processing library not installed: {str(e)}")
+                    st.info("Install with: pip install pymupdf or pip install pypdf")
+                except Exception as e:
+                    st.error(f"Error processing PDF: {str(e)}")
 
     if st.button("🔨 Create Knowledge Base", type="primary"):
         if not rag_input or rag_input.strip() == "":
@@ -841,7 +917,9 @@ with tab1:
                     ollama_model,
                     ollama_base_url,
                     profile_id=profile_id,
-                    progress_callback=lambda step, msg: status_text.info(f"📝 {step}: {msg}")
+                    progress_callback=lambda step, msg: status_text.info(f"📝 {step}: {msg}"),
+                    title=kb_title if kb_title else None,
+                    pdf_metadata=kb_pdf_metadata
                 )
                 
                 # Clear status

@@ -136,6 +136,8 @@ class KnowledgeBaseManager:
         persist_dir: str,
         text_preview: str = "",
         chunk_count: int = 0,
+        title: str = None,
+        pdf_metadata: dict = None,
     ) -> None:
         """Register a new knowledge base in metadata.
         
@@ -144,10 +146,12 @@ class KnowledgeBaseManager:
             persist_dir: Directory path where the KB is stored
             text_preview: Preview of the text (first 200 chars)
             chunk_count: Number of chunks in the knowledge base
+            title: Optional title for the knowledge base
+            pdf_metadata: Optional PDF metadata dictionary (author, subject, etc.)
         """
         metadata = self._load_metadata()
         
-        metadata[kb_id] = {
+        kb_data = {
             "persist_dir": persist_dir,
             "text_preview": text_preview[:200] if text_preview else "",
             "chunk_count": chunk_count,
@@ -155,6 +159,14 @@ class KnowledgeBaseManager:
             "updated_at": datetime.now().isoformat(),
         }
         
+        if title:
+            kb_data["title"] = title
+        
+        # Add PDF metadata if provided
+        if pdf_metadata:
+            kb_data["pdf_metadata"] = pdf_metadata
+        
+        metadata[kb_id] = kb_data
         self._save_metadata(metadata)
     
     def update_knowledge_base(
@@ -208,6 +220,8 @@ class KnowledgeBaseManager:
                     "chunk_count": kb_data.get("chunk_count", 0),
                     "created_at": kb_data.get("created_at", ""),
                     "updated_at": kb_data.get("updated_at", ""),
+                    "title": kb_data.get("title", ""),
+                    "pdf_metadata": kb_data.get("pdf_metadata", {}),
                 })
         
         # Sort by most recently updated
