@@ -911,6 +911,36 @@ with tab1:
                     })
                     st.rerun()
         
+        # Generate JSON from structured data ALWAYS (before display)
+        json_output = {}
+        stack = [json_output]
+        indent_levels = [0]
+        
+        for entry in st.session_state.structured_data:
+            key = entry['key']
+            value = entry.get('value', '')
+            indent = entry.get('indent', 0)
+            
+            while len(indent_levels) > 1 and indent_levels[-1] >= indent:
+                stack.pop()
+                indent_levels.pop()
+            
+            if value:
+                if value.lower() in ['true', 'false']:
+                    stack[-1][key] = value.lower() == 'true'
+                else:
+                    try:
+                        stack[-1][key] = float(value) if '.' in value else int(value)
+                    except ValueError:
+                        stack[-1][key] = value
+            else:
+                stack[-1][key] = {}
+                stack.append(stack[-1][key])
+                indent_levels.append(indent)
+        
+        json_str = json.dumps(json_output, indent=2)
+        rag_input = json_str  # Set this BEFORE the UI display
+        
         # Display tree structure
         if st.session_state.structured_data:
             st.markdown("---")
@@ -966,38 +996,9 @@ with tab1:
             
             # JSON Preview
             with st.expander("📊 JSON Preview", expanded=True):
-                json_output = {}
-                stack = [json_output]
-                indent_levels = [0]
-                
-                for entry in st.session_state.structured_data:
-                    key = entry['key']
-                    value = entry.get('value', '')
-                    indent = entry.get('indent', 0)
-                    
-                    while len(indent_levels) > 1 and indent_levels[-1] >= indent:
-                        stack.pop()
-                        indent_levels.pop()
-                    
-                    if value:
-                        if value.lower() in ['true', 'false']:
-                            stack[-1][key] = value.lower() == 'true'
-                        else:
-                            try:
-                                stack[-1][key] = float(value) if '.' in value else int(value)
-                            except ValueError:
-                                stack[-1][key] = value
-                    else:
-                        stack[-1][key] = {}
-                        stack.append(stack[-1][key])
-                        indent_levels.append(indent)
-                
-                json_str = json.dumps(json_output, indent=2)
                 st.code(json_str, language="json")
-                rag_input = json_str
         else:
             st.info("Add your first field above to get started!")
-            rag_input = ""
     else:  # PDF Upload
         uploaded_file = st.file_uploader(
             "Choose a PDF file",

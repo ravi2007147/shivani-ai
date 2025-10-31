@@ -113,13 +113,8 @@ with col1:
                         show_details = st.checkbox("📄 Show Details", key=f"details_{kb['id']}_{kb.get('profile_id', '')}")
                         if show_details:
                             st.write(f"**Text Preview:**")
-                            st.text_area(
-                                "Preview",
-                                value=kb['text_preview'],
-                                height=150,
-                                disabled=True,
-                                key=f"preview_{kb['id']}_{kb.get('profile_id', '')}"
-                            )
+                            preview_text = kb['text_preview'] if kb.get('text_preview') else "(No preview available)"
+                            st.code(preview_text, language="text")
                             
                             col_info1, col_info2 = st.columns(2)
                             with col_info1:

@@ -144,7 +144,7 @@ class KnowledgeBaseManager:
         Args:
             kb_id: Unique ID for the knowledge base
             persist_dir: Directory path where the KB is stored
-            text_preview: Preview of the text (first 200 chars)
+            text_preview: Preview of the text (first 1000 chars)
             chunk_count: Number of chunks in the knowledge base
             title: Optional title for the knowledge base
             pdf_metadata: Optional PDF metadata dictionary (author, subject, etc.)
@@ -153,7 +153,7 @@ class KnowledgeBaseManager:
         
         kb_data = {
             "persist_dir": persist_dir,
-            "text_preview": text_preview[:200] if text_preview else "",
+            "text_preview": text_preview[:1000] if text_preview else "",  # Increased from 200 to 1000 for better preview
             "chunk_count": chunk_count,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
