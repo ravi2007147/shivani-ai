@@ -610,27 +610,17 @@ if not all_profiles:
 
 st.session_state.all_profiles = all_profiles
 
-# Profile selection at the top
-if all_profiles:
-    profile_options = {p.get('name'): p.get('id') for p in all_profiles}
-    profile_names = list(profile_options.keys())
-    
-    # Multi-select for profiles
-    selected_profile_names = st.multiselect(
-        "👤 Select Profile(s)",
-        options=profile_names,
-        default=[profile_names[0]] if profile_names else [],
-        help="Select one or more profiles. Queries will search across all selected profiles' knowledge bases."
-    )
-    
-    # Convert names to IDs
-    st.session_state.selected_profiles = [
-        profile_options[name] for name in selected_profile_names
-    ] if selected_profile_names else [all_profiles[0].get('id')]
-else:
-    st.session_state.selected_profiles = ["default"]
-
-st.markdown("---")
+# Initialize profile selection for querying (multiple profiles)
+# This will be set per tab
+if 'query_profiles' not in st.session_state:
+    if all_profiles:
+        profile_options = {p.get('name'): p.get('id') for p in all_profiles}
+        profile_names = list(profile_options.keys())
+        st.session_state.query_profiles = [all_profiles[0].get('id')] if all_profiles else ["default"]
+        st.session_state.selected_profiles = st.session_state.query_profiles  # For KB creation (single)
+    else:
+        st.session_state.query_profiles = ["default"]
+        st.session_state.selected_profiles = ["default"]
 
 # Sidebar for configuration
 with st.sidebar:
@@ -713,21 +703,23 @@ with st.sidebar:
             help="The Ollama embedding model (models not loaded)"
         )
     
-    # Auto-load ALL knowledge bases from selected profiles on startup
+    # Auto-load ALL knowledge bases from query profiles on startup (for query tab)
+    # Use query_profiles if available, otherwise use selected_profiles
+    query_profiles_for_loading = st.session_state.get('query_profiles', st.session_state.get('selected_profiles', ["default"]))
     if not st.session_state.knowledge_base_created and not st.session_state.vectorstores:
-        # Load KBs from selected profiles
-        if st.session_state.selected_profiles:
+        # Load KBs from query profiles
+        if query_profiles_for_loading:
             if load_all_knowledge_bases(
                 embedding_model,
                 ollama_model,
                 ollama_base_url,
-                profile_ids=st.session_state.selected_profiles,
+                profile_ids=query_profiles_for_loading,
             ):
                 profile_names = [
                     next((p.get('name') for p in st.session_state.all_profiles if p.get('id') == pid), pid)
-                    for pid in st.session_state.selected_profiles
+                    for pid in query_profiles_for_loading
                 ]
-                st.success(f"✅ Loaded {len(st.session_state.active_kb_ids)} knowledge base(s) from {len(st.session_state.selected_profiles)} profile(s) - {', '.join(profile_names)}")
+                st.success(f"✅ Loaded {len(st.session_state.active_kb_ids)} knowledge base(s) from {len(query_profiles_for_loading)} profile(s) - {', '.join(profile_names)}")
 
     st.markdown("---")
     
@@ -787,90 +779,129 @@ with st.sidebar:
             st.success("✅ Current knowledge base cleared (still saved on disk)")
             st.rerun()
 
-# Main content area
-col1, col2 = st.columns([1, 1])
+# Main content area with Tabs
+tab1, tab2 = st.tabs(["📝 Create Knowledge Base", "💬 Query"])
 
-with col1:
-    st.header("📝 RAG Text Input (Optional)")
-    st.markdown("Enter text to create a knowledge base for context-aware responses. Leave empty to query the model directly.")
-
+# Tab 1: Create Knowledge Base (Single Profile)
+with tab1:
+    st.header("📝 Create Knowledge Base")
+    st.markdown("Select a profile and enter text to create a knowledge base. The knowledge base will be saved under the selected profile.")
+    
+    # Single profile selection for KB creation
+    if all_profiles:
+        profile_options = {p.get('name'): p.get('id') for p in all_profiles}
+        profile_names = list(profile_options.keys())
+        
+        selected_profile_name = st.selectbox(
+            "👤 Select Profile (for this knowledge base)",
+            options=profile_names,
+            index=0 if profile_names else None,
+            help="Select ONE profile where this knowledge base will be saved."
+        )
+        
+        # Store single profile for KB creation
+        st.session_state.selected_profiles = [profile_options[selected_profile_name]] if selected_profile_name else ["default"]
+    else:
+        st.session_state.selected_profiles = ["default"]
+    
+    st.markdown("---")
+    
     rag_input = st.text_area(
         "RAG Text Box",
-        height=400,
+        height=500,
         value=st.session_state.rag_text,
-        placeholder="(Optional) Enter your text here to create a knowledge base...\n\nLeave empty and click 'Create Knowledge Base' to query the model directly.\n\nExample:\n\nArtificial intelligence (AI) is transforming industries across the globe. Machine learning algorithms can process vast amounts of data to make predictions and decisions. Natural language processing enables computers to understand and generate human language..."
+        placeholder="Enter your text here to create a knowledge base...\n\nExample:\n\nArtificial intelligence (AI) is transforming industries across the globe. Machine learning algorithms can process vast amounts of data to make predictions and decisions. Natural language processing enables computers to understand and generate human language..."
     )
 
     if st.button("🔨 Create Knowledge Base", type="primary"):
-        try:
-            if not rag_input or rag_input.strip() == "":
-                # If no RAG text, just initialize LLM for direct queries
-                with st.spinner("Initializing LLM..."):
-                    try:
-                        success = initialize_llm_for_direct_query(ollama_model, ollama_base_url)
-                        if success:
-                            st.success("✅ LLM initialized. You can now query directly without RAG context.")
-                            st.rerun()
-                        else:
-                            st.error("Error initializing LLM. Make sure Ollama is running locally and the model is available.")
-                    except Exception as e:
-                        st.error(f"Error initializing LLM: {str(e)}")
-                        st.exception(e)
-            else:
-                # Create knowledge base with RAG
-                try:
-                    # Get selected profile ID
-                    if not st.session_state.selected_profiles:
-                        st.warning("⚠️ No profile selected. Using default profile.")
-                        profile_id = "default"
-                    else:
-                        profile_id = st.session_state.selected_profiles[0]
-                    
-                    # Show initial status
-                    status_text = st.empty()
-                    status_text.info(f"📝 Creating knowledge base for profile: {profile_id}")
-                    
-                    # Create knowledge base with progress updates
-                    success, message, progress_updates = create_knowledge_base_with_progress(
-                        rag_input,
-                        embedding_model,
-                        ollama_model,
-                        ollama_base_url,
-                        profile_id=profile_id,
-                        progress_callback=lambda step, msg: status_text.info(f"📝 {step}: {msg}")
-                    )
-                    
-                    # Clear status
-                    status_text.empty()
-                    
-                    if success:
-                        st.success(message)
-                        # Clear the input box after successful creation
-                        st.session_state.rag_text = ""
-                        time.sleep(1)  # Give user time to see success message
-                        st.rerun()
-                    else:
-                        st.error(message)
-                        st.info("Make sure Ollama is running locally and models are available.")
-                        # Don't auto-rerun on error, let user see the error
-                except Exception as e:
-                    st.error(f"❌ Error creating knowledge base: {str(e)}")
-                    st.exception(e)
-                    import traceback
-                    st.code(traceback.format_exc())
-        except Exception as e:
-            st.error(f"❌ Unexpected error: {str(e)}")
-            st.exception(e)
-            import traceback
-            st.code(traceback.format_exc())
+        if not rag_input or rag_input.strip() == "":
+            st.warning("⚠️ Please enter text to create a knowledge base.")
+        else:
+            try:
+                # Get selected profile ID (single profile for KB creation)
+                if not st.session_state.selected_profiles:
+                    st.warning("⚠️ No profile selected. Using default profile.")
+                    profile_id = "default"
+                else:
+                    profile_id = st.session_state.selected_profiles[0]
+                
+                # Show initial status
+                status_text = st.empty()
+                # Get profile name for display
+                from src.utils.kb_manager import ProfileManager
+                pm = ProfileManager()
+                all_profiles_list = pm.load_profiles()
+                profile_name = next((p.get('name') for p in all_profiles_list if p.get('id') == profile_id), profile_id)
+                status_text.info(f"📝 Creating knowledge base for profile: **{profile_name}**")
+                
+                # Create knowledge base with progress updates
+                success, message, progress_updates = create_knowledge_base_with_progress(
+                    rag_input,
+                    embedding_model,
+                    ollama_model,
+                    ollama_base_url,
+                    profile_id=profile_id,
+                    progress_callback=lambda step, msg: status_text.info(f"📝 {step}: {msg}")
+                )
+                
+                # Clear status
+                status_text.empty()
+                
+                if success:
+                    st.success(message)
+                    # Clear the input box after successful creation
+                    st.session_state.rag_text = ""
+                    time.sleep(1)  # Give user time to see success message
+                    st.rerun()
+                else:
+                    st.error(message)
+                    st.info("Make sure Ollama is running locally and models are available.")
+            except Exception as e:
+                st.error(f"❌ Error creating knowledge base: {str(e)}")
+                st.exception(e)
+                import traceback
+                st.code(traceback.format_exc())
 
-with col2:
+# Tab 2: Query (Multiple Profiles)
+with tab2:
     st.header("💬 Query")
-    st.markdown("Ask questions to the model. Will use knowledge base if available, otherwise direct model response.")
-
+    st.markdown("Select one or more profiles to search across their knowledge bases. Queries will retrieve information from all selected profiles.")
+    
+    # Multiple profile selection for querying
+    if all_profiles:
+        profile_options_query = {p.get('name'): p.get('id') for p in all_profiles}
+        profile_names_query = list(profile_options_query.keys())
+        
+        # Initialize query profiles if not set
+        if 'query_profiles' not in st.session_state:
+            st.session_state.query_profiles = [all_profiles[0].get('id')] if all_profiles else ["default"]
+        
+        # Get current selection
+        current_selected_names = [name for name, pid in profile_options_query.items() if pid in st.session_state.query_profiles]
+        
+        selected_profile_names_query = st.multiselect(
+            "👤 Select Profile(s) to Query",
+            options=profile_names_query,
+            default=current_selected_names if current_selected_names else [profile_names_query[0]] if profile_names_query else [],
+            help="Select one or more profiles. Queries will search across all selected profiles' knowledge bases."
+        )
+        
+        # Convert names to IDs for querying
+        st.session_state.query_profiles = [
+            profile_options_query[name] for name in selected_profile_names_query
+        ] if selected_profile_names_query else [all_profiles[0].get('id')]
+        
+        # Update selected_profiles for querying (this affects which KBs are loaded)
+        st.session_state.selected_profiles = st.session_state.query_profiles
+    else:
+        st.session_state.query_profiles = ["default"]
+        st.session_state.selected_profiles = ["default"]
+    
+    st.markdown("---")
+    
     query_input = st.text_area(
         "Query Text Box",
-        height=200,
+        height=300,
         placeholder="Enter your question here... For example:\n\nWhat is artificial intelligence?\n\nWhat are the main concepts?\n\nExplain in detail...",
     )
 
@@ -887,15 +918,25 @@ with col2:
                         
                         # Display answer
                         st.subheader("📋 Answer (with RAG context)")
-                        st.write(result["answer"])
+                        st.markdown("---")
+                        st.markdown(result["answer"])
+                        st.markdown("---")
 
                         # Display source documents if available
                         if result.get("context_documents"):
-                            with st.expander("📚 Source Documents"):
-                                for i, doc in enumerate(result["context_documents"][:3], 1):
+                            with st.expander("📚 View Source Documents", expanded=False):
+                                for i, doc in enumerate(result["context_documents"][:5], 1):
                                     st.markdown(f"**Source {i}:**")
                                     content = doc.page_content
-                                    st.text(content[:500] + "..." if len(content) > 500 else content)
+                                    # Show more content in query tab
+                                    preview_content = content[:800] + "..." if len(content) > 800 else content
+                                    st.text_area(
+                                        f"Content {i}",
+                                        value=preview_content,
+                                        height=150,
+                                        disabled=True,
+                                        key=f"source_{i}"
+                                    )
                                     st.markdown("---")
                     else:
                         # Direct LLM query without RAG
@@ -912,8 +953,10 @@ with col2:
                         
                         # Display answer
                         st.subheader("📋 Answer (direct LLM response)")
-                        st.write(answer)
-                        st.info("💡 Tip: Add text to the RAG Text Box and create a knowledge base for context-aware responses.")
+                        st.markdown("---")
+                        st.markdown(answer)
+                        st.markdown("---")
+                        st.info("💡 Tip: Create a knowledge base in the 'Create Knowledge Base' tab for context-aware responses.")
 
                 except Exception as e:
                     st.error(f"Error processing query: {str(e)}")

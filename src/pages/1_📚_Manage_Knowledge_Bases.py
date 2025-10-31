@@ -221,8 +221,8 @@ with col1:
         st.info(f"Found {total_kbs} knowledge base(s) across {total_profiles} profile(s)")
         
         # Display current KB if any
-        if st.session_state.get('knowledge_base_created') and st.session_state.get('current_kb_id'):
-            current_kb_id = st.session_state.current_kb_id
+        current_kb_id = st.session_state.get('current_kb_id') or ''
+        if st.session_state.get('knowledge_base_created') and current_kb_id:
             # Handle both old format (just kb_id) and new format (profile_id:kb_id)
             if ':' in current_kb_id:
                 profile_part, kb_part = current_kb_id.split(':', 1)
@@ -241,13 +241,13 @@ with col1:
                         st.markdown("---")
                         
                         # KB header with status
-                        current_kb_id = st.session_state.get('current_kb_id', '')
+                        current_kb_id = st.session_state.get('current_kb_id', '') or ''
                         # Handle both old format (just kb_id) and new format (profile_id:kb_id)
-                        if ':' in current_kb_id:
+                        if current_kb_id and ':' in current_kb_id:
                             profile_part, kb_part = current_kb_id.split(':', 1)
                             is_current = (kb.get("profile_id") == profile_part and kb["id"] == kb_part)
                         else:
-                            is_current = (kb["id"] == current_kb_id)
+                            is_current = (current_kb_id and kb["id"] == current_kb_id)
                         
                         status_badge = "🟢 **ACTIVE**" if is_current else "⚪ Inactive"
                         
