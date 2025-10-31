@@ -141,7 +141,10 @@ def load_all_knowledge_bases(
         kb_list = kb_manager.list_knowledge_bases()
         
         if not kb_list:
+            print(f"[DEBUG] Profile {profile_id}: No knowledge bases found")
             continue
+        
+        print(f"[DEBUG] Profile {profile_id}: Found {len(kb_list)} KB(s)")
         
         # Load all knowledge bases from this profile
         for kb in kb_list:
@@ -149,9 +152,11 @@ def load_all_knowledge_bases(
             kb_id = kb.get("id")
             
             if not persist_dir or not os.path.exists(persist_dir):
+                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Invalid path {persist_dir}")
                 continue
             
             if not os.listdir(persist_dir):
+                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Empty directory")
                 continue
             
             try:
@@ -165,8 +170,10 @@ def load_all_knowledge_bases(
                 
                 loaded_vectorstores.append(vectorstore)
                 loaded_kb_ids.append(f"{profile_id}:{kb_id}")
-            except Exception:
+                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Loaded successfully")
+            except Exception as e:
                 # Skip this KB if it fails to load
+                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Failed to load - {str(e)}")
                 continue
     
     if not loaded_vectorstores:
@@ -197,6 +204,8 @@ def load_all_knowledge_bases(
         st.session_state.rag_pipeline = rag_pipeline
         st.session_state.active_kb_ids = loaded_kb_ids
         st.session_state.knowledge_base_created = True
+        
+        print(f"[DEBUG] Successfully loaded {len(loaded_vectorstores)} KB(s): {loaded_kb_ids}")
         
         return True
     except Exception as e:
@@ -965,12 +974,33 @@ with tab2:
         )
         
         # Convert names to IDs for querying
-        st.session_state.query_profiles = [
+        new_query_profiles = [
             profile_options_query[name] for name in selected_profile_names_query
         ] if selected_profile_names_query else [all_profiles[0].get('id')]
         
+        # Check if profile selection has changed
+        profiles_changed = set(st.session_state.query_profiles) != set(new_query_profiles)
+        st.session_state.query_profiles = new_query_profiles
+        
         # Update selected_profiles for querying (this affects which KBs are loaded)
         st.session_state.selected_profiles = st.session_state.query_profiles
+        
+        # Reload KBs if profiles changed
+        if profiles_changed and st.session_state.query_profiles:
+            with st.spinner("Loading knowledge bases from selected profiles..."):
+                if load_all_knowledge_bases(
+                    embedding_model,
+                    ollama_model,
+                    ollama_base_url,
+                    profile_ids=st.session_state.query_profiles,
+                ):
+                    profile_names = [
+                        next((p.get('name') for p in all_profiles if p.get('id') == pid), pid)
+                        for pid in st.session_state.query_profiles
+                    ]
+                    st.success(f"✅ Loaded {len(st.session_state.active_kb_ids)} knowledge base(s) from {len(st.session_state.query_profiles)} profile(s): {', '.join(profile_names)}")
+                else:
+                    st.warning("⚠️ No knowledge bases found in selected profiles")
     else:
         st.session_state.query_profiles = ["default"]
         st.session_state.selected_profiles = ["default"]
