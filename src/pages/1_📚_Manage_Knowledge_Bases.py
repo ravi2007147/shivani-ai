@@ -257,8 +257,9 @@ with col1:
                         with col_header2:
                             st.caption(f"{kb['chunk_count']} chunks")
                         
-                        # KB details
-                        with st.expander("📄 View Details"):
+                        # KB details - displayed directly (nested expanders not allowed in Streamlit)
+                        show_details = st.checkbox("📄 Show Details", key=f"details_{kb['id']}_{kb.get('profile_id', '')}")
+                        if show_details:
                             st.write(f"**Text Preview:**")
                             st.text_area(
                                 "Preview",
