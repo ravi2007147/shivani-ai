@@ -1,0 +1,90 @@
+# Python - Compiled files only (source .py files should be tracked)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Python - Build artifacts (these are generated, not needed in repo)
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IMPORTANT: Do NOT ignore these (they are needed to run the project):
+# - src/ (all Python source files)
+# - requirements.txt
+# - README.md
+# - *.py files in project root (if any)
+
+# Virtual Environments (user creates these locally)
+# NOTE: These should NOT be committed, but users need to create their own
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+shivani-env/  # Project-specific virtual environment
+.venv/
+
+# ChromaDB / Knowledge Bases (user-specific data)
+# NOTE: Users will create their own knowledge bases locally
+.chroma_db/
+*.sqlite3
+*.sqlite
+*.db
+
+# Streamlit
+.streamlit/
+
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
