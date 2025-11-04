@@ -1,76 +1,67 @@
-"""SQL RAG for expense database querying using LangChain Agent with persistent context."""
+"""SQL RAG for expense database querying using LangChain Agent with persistent schema context (Stable SQLite + Ollama Version)."""
 
 import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import date
 from calendar import monthrange
+import re
 
 # Add project root to path
-project_root = Path(__file__).parent.parent.parent
+project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+# LangChain imports
 from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_ollama import OllamaLLM
-from langchain_community.agent_toolkits import create_sql_agent
 
+# Local imports
 from src.utils.expense_db import ExpenseDB
 from src.utils.db_schema_loader import get_database_schema_document
 
 
 class ExpenseSQLRAG:
-    """SQL RAG class for querying expense database using natural language with persistent context."""
-    
+    """SQL RAG system for querying an expense and income database via natural language."""
+
     def __init__(self, ollama_model: str = "mistral", ollama_base_url: str = "http://localhost:11434"):
-        """Initialize the SQL RAG system with persistent schema context.
-        
-        Args:
-            ollama_model: Name of the LLM model to use
-            ollama_base_url: Base URL for Ollama API
-        """
+        """Initialize with persistent schema context."""
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
         self.db = ExpenseDB()
         self.sql_db = None
         self.agent = None
         self.llm = None
-        self.schema_context = None  # Persistent schema context
+        self.schema_context = None
+
         self._initialize_database()
         self._load_schema_context()
         self._initialize_agent()
-    
+
+    # ---------------------------------------------
+    # Database setup
+    # ---------------------------------------------
     def _initialize_database(self):
-        """Initialize SQLDatabase connection."""
-        # Get the database path from ExpenseDB
+        """Connect SQLite DB for use with LangChain SQL agent."""
         db_path = self.db.db_path
-        
-        # Create SQLDatabase instance with schema info
-        # Include sample rows for better understanding
         self.sql_db = SQLDatabase.from_uri(
             f"sqlite:///{db_path}",
-            include_tables=[
-                'income',
-                'expense',
-                'categories',
-                'accounts',
-                'sources'
-            ],
-            sample_rows_in_table_info=2  # Reduced for efficiency
+            include_tables=["income", "expense", "categories", "accounts", "sources"],
+            sample_rows_in_table_info=2,
         )
-    
+
+    # ---------------------------------------------
+    # Schema context
+    # ---------------------------------------------
     def _load_schema_context(self):
-        """Load database schema context once and store it persistently."""
-        # Get comprehensive schema document
-        self.schema_context = get_database_schema_document()
-        
-        # Get current month info
+        """Load and build schema context with current month awareness."""
+        schema_doc = get_database_schema_document()
         today = date.today()
         first_day = date(today.year, today.month, 1)
         last_day = date(today.year, today.month, monthrange(today.year, today.month)[1])
-        
-        # Add current context
-        self.schema_context += f"""
+
+        self.schema_context = f"""{schema_doc}
 
 CURRENT CONTEXT (automatically updated):
 - Today: {today.isoformat()} ({today.strftime('%B %d, %Y')})
@@ -79,166 +70,152 @@ CURRENT CONTEXT (automatically updated):
 - Current Month Name: {today.strftime('%B %Y')}
 
 When users say "this month", it refers to {first_day.isoformat()} to {last_day.isoformat()}.
+IMPORTANT: Table names are singular — use "expense" and "income", not "expenses" or "incomes".
 """
-    
+
+    # ---------------------------------------------
+    # Agent initialization
+    # ---------------------------------------------
     def _initialize_agent(self):
-        """Initialize the SQL agent with persistent schema context."""
-        # Initialize LLM
+        """Initialize SQL agent with Ollama and SQLite-safe rules."""
         self.llm = OllamaLLM(
             model=self.ollama_model,
             base_url=self.ollama_base_url,
-            temperature=0.1  # Lower temperature for more accurate SQL generation
+            temperature=0.1,
         )
-        
-        # Create system prompt with persistent schema context
-        system_prompt = f"""You are an expert SQL query generator for an expense and income management database.
+
+        system_prompt = f"""
+You are an expert SQL assistant for a personal finance tracking system.
 
 {self.schema_context}
 
-Your task is to:
-1. Understand natural language questions about income, expenses, and financial data
-2. Generate accurate SQL queries to retrieve the requested information
-3. Execute queries safely (only SELECT statements, no modifications)
-4. Format results in a clear, human-readable way
-5. Remember previous context in the conversation
+SQL DIALECT & EXECUTION RULES:
+- The database is SQLite. Do NOT use unsupported features (e.g., INTERVAL, DATE_ADD, EXTRACT).
+- Date filtering: use BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD' (inclusive).
+- Only SELECT statements are allowed. Never modify or delete data.
+- One tool call must contain only ONE SELECT statement (no multiple SELECTs separated by semicolons).
+- Use JOINs only when retrieving category/account/source names. Never join income and expense together.
 
-**Important Guidelines:**
-- Always use JOINs to include category names, account names, and source names (not IDs)
-- For "this month" queries, use the current month date range from the context above
-- For date filtering, use: date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD'
-- Always aggregate amounts when calculating totals (use SUM)
-- Include currency information in responses
-- Format large numbers with commas for readability (e.g., 50,000.00)
-- Group results logically (by category, by month, by account, etc.)
-- If user asks follow-up questions like "and last month?" or "break it down by category", use context from previous queries
+BALANCE / NET CALCULATION RULES:
+- When calculating remaining balance (income - expenses), NEVER JOIN income and expense.
+- Instead, use independent scalar subqueries:
+  SELECT
+    (SELECT COALESCE(SUM(amount),0) FROM income WHERE date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD')
+    -
+    (SELECT COALESCE(SUM(amount),0) FROM expense WHERE date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD')
+  AS balance;
+- This avoids double-counting that happens with cartesian joins like 'INNER JOIN ON 1=1'.
+- If there are multiple income or expense entries, subqueries ensure correct arithmetic.
 
-**Query Examples:**
-- "What are my expenses this month?" → SELECT expense records with date filter for current month
-- "Show me income by category" → SELECT with GROUP BY category, JOIN to get category names
-- "What's my total income last month?" → SELECT SUM with date filter for previous month
-- "List expenses over 5000" → SELECT with amount > 5000 filter
-- Follow-up: "And last month?" → Use previous query structure but change date range to last month
-
-ONLY generate SELECT queries. NEVER generate INSERT, UPDATE, DELETE, or DROP statements.
+STYLE & OUTPUT:
+- Use table names exactly: income, expense, categories, accounts, sources.
+- For "this month", use CURRENT CONTEXT above.
+- Return amounts in INR with commas and two decimals (e.g., ₹11,500.00).
+- Do not include markdown, code blocks, or commentary in final answer.
 """
-        
-        # Create SQL agent with custom prompt
-        # The create_sql_agent handles the tool creation and agent setup
+
+        self.agent = create_sql_agent(
+            llm=self.llm,
+            db=self.sql_db,
+            agent_type="zero-shot-react-description",
+            verbose=True,
+            system_message=system_prompt.strip(),
+            handle_parsing_errors=True,
+        )
+
+    # ---------------------------------------------
+    # Query execution
+    # ---------------------------------------------
+    def query(self, question: str, conversation_history: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Run a natural language question through the SQL RAG agent."""
+        from langchain_core.exceptions import OutputParserException
+        SQLITE_MULTI_STMT_ERR = "You can only execute one statement at a time"
+
         try:
-            self.agent = create_sql_agent(
-                llm=self.llm,
-                db=self.sql_db,
-                verbose=False,
-                handle_parsing_errors=True,
-                max_iterations=5,
-                agent_executor_kwargs={
-                    "return_intermediate_steps": False,
-                    "handle_parsing_errors": True
-                }
-            )
-        except (TypeError, AttributeError):
-            # Fallback if parameters not supported
-            try:
-                self.agent = create_sql_agent(
-                    llm=self.llm,
-                    db=self.sql_db,
-                    verbose=False,
-                    handle_parsing_errors=True
-                )
-            except (TypeError, AttributeError):
-                # Final fallback
-                self.agent = create_sql_agent(
-                    llm=self.llm,
-                    db=self.sql_db,
-                    verbose=False
-                )
-    
-    def query(self, question: str, conversation_history: List[str] = None) -> Dict[str, Any]:
-        """Query the database using natural language with persistent context.
-        
-        Args:
-            question: Natural language question about expenses/income
-            conversation_history: Optional list of previous questions/answers for context
-            
-        Returns:
-            Dictionary with 'answer', 'success', and optionally 'error'
-        """
-        try:
-            # Refresh current month context if needed (for date-related queries)
-            # This ensures "this month" always refers to the current month
             self._refresh_date_context()
-            
-            # Build enhanced query with schema context and optional conversation history
-            # Note: create_sql_agent may not use custom system prompts, so we include context in the input
-            # The SQLDatabase already provides table schemas, but we add our enhanced context
-            enhanced_query = f"""Additional Database Context:
+
+            enhanced_query = f"""
 {self.schema_context}
 
+User Question: {question}
+
+Please follow:
+- SQLite supports only one SELECT per tool call.
+- If you need both income and expense totals, query them separately and compute in reasoning.
+- Do not use JOIN income + expense. Use scalar subqueries for balance.
+- Use INR currency formatting.
 """
-            
+
             if conversation_history:
-                enhanced_query += f"""Previous conversation:
-{chr(10).join(f"- {msg}" for msg in conversation_history[-3:])}  # Last 3 messages
+                enhanced_query += "\nConversation History:\n" + "\n".join(conversation_history[-3:])
 
-"""
-            
-            enhanced_query += f"""Current question: {question}
-
-Please generate an SQL query to answer this question using the schema context above. Use JOINs to get category names, account names, and source names. Format numbers with commas for readability.
-"""
-            
-            # Run the agent
             result = self.agent.invoke({"input": enhanced_query})
-            
-            # Extract answer - the result structure may vary
-            if isinstance(result, dict):
-                answer = result.get("output", result.get("answer", str(result)))
-            else:
-                answer = str(result)
-            
-            if not answer or answer.strip() == "":
-                answer = "I couldn't process your query. Please try rephrasing."
-            
-            return {
-                "success": True,
-                "answer": answer,
-                "query": question
-            }
-            
+            answer = self._extract_answer_text(result)
+
+            # Sanity check (cartesian join detection)
+            answer = self._sanity_check_balance(answer)
+
+            return {"success": True, "answer": answer, "query": question}
+
+        except OutputParserException as e:
+            raw_text = getattr(e, "llm_output", None) or str(e)
+            print("[ExpenseSQLRAG] Output parsing error recovered.")
+            return {"success": True, "answer": raw_text.strip(), "query": question}
+
         except Exception as e:
-            error_msg = str(e)
-            # Provide helpful error messages
-            if "no such table" in error_msg.lower():
-                return {
-                    "success": False,
-                    "answer": "I encountered an error accessing the database. Please ensure the database is properly initialized.",
-                    "error": error_msg,
-                    "query": question
-                }
-            elif "syntax error" in error_msg.lower() or "sql" in error_msg.lower():
-                return {
-                    "success": False,
-                    "answer": "I had trouble understanding your question. Could you please rephrase it? For example: 'What are my expenses this month?' or 'Show me my income by category.'",
-                    "error": error_msg,
-                    "query": question
-                }
-            else:
-                return {
-                    "success": False,
-                    "answer": f"I encountered an error while processing your query: {error_msg}. Please try rephrasing your question.",
-                    "error": error_msg,
-                    "query": question
-                }
-    
+            err = str(e)
+            print("[ExpenseSQLRAG] Error:", err)
+
+            if SQLITE_MULTI_STMT_ERR in err:
+                try:
+                    retry_query = enhanced_query + "\n⚠️ Important: Only ONE SELECT per SQL tool call!"
+                    result = self.agent.invoke({"input": retry_query})
+                    answer = self._extract_answer_text(result)
+                    answer = self._sanity_check_balance(answer)
+                    return {"success": True, "answer": answer, "query": question, "note": "Retried safely."}
+                except Exception as e2:
+                    return {
+                        "success": False,
+                        "answer": "Retry failed due to multi-statement error again.",
+                        "error": str(e2),
+                        "query": question,
+                    }
+
+            if "no such table" in err.lower():
+                return {"success": False, "answer": "Database schema mismatch. Ensure tables exist.", "error": err}
+            if "OUTPUT_PARSING_FAILURE" in err:
+                return {"success": False, "answer": "Model output was unclear, but SQL likely worked.", "error": err}
+            return {"success": False, "answer": f"Unexpected error: {err}", "error": err}
+
+    # ---------------------------------------------
+    # Helpers
+    # ---------------------------------------------
+    def _extract_answer_text(self, result: Any) -> str:
+        if isinstance(result, dict):
+            return result.get("output") or result.get("final_answer") or str(result)
+        return str(result)
+
+    def _sanity_check_balance(self, answer: str) -> str:
+        """Detect impossible or double-counted results."""
+        nums = re.findall(r"\d[\d,]*\.?\d*", answer)
+        if len(nums) >= 2:
+            try:
+                vals = [float(x.replace(",", "")) for x in nums]
+                if max(vals) > 10 * min(vals):  # suspicious ratio
+                    print("[SanityCheck] Possible double-count detected (JOIN issue).")
+                    return answer + "\n(Note: Possible JOIN double-counting detected. Check using scalar subqueries.)"
+            except:
+                pass
+        return answer
+
+    # ---------------------------------------------
+    # Context refresh
+    # ---------------------------------------------
     def _refresh_date_context(self):
-        """Refresh date context in schema for current date awareness."""
-        # Update the date portion of schema context
+        """Keep schema context synced with today's date."""
         today = date.today()
         first_day = date(today.year, today.month, 1)
         last_day = date(today.year, today.month, monthrange(today.year, today.month)[1])
-        
-        # Update schema context's date section
-        # This ensures "this month" always refers to current month
         date_section = f"""
 CURRENT CONTEXT (automatically updated):
 - Today: {today.isoformat()} ({today.strftime('%B %d, %Y')})
@@ -248,70 +225,58 @@ CURRENT CONTEXT (automatically updated):
 
 When users say "this month", it refers to {first_day.isoformat()} to {last_day.isoformat()}.
 """
-        
-        # Replace the date context section in schema_context
         if self.schema_context:
-            # Find and replace the CURRENT CONTEXT section
-            lines = self.schema_context.split('\n')
-            new_lines = []
-            skip_until_empty = False
+            lines = self.schema_context.splitlines()
+            new_lines, skip = [], False
             for line in lines:
                 if "CURRENT CONTEXT" in line:
-                    skip_until_empty = True
                     new_lines.append(date_section.strip())
+                    skip = True
                     continue
-                if skip_until_empty:
-                    if line.strip() == "":
-                        skip_until_empty = False
-                        new_lines.append(line)
+                if skip and line.strip() == "":
+                    skip = False
                     continue
-                new_lines.append(line)
-            self.schema_context = '\n'.join(new_lines)
-    
+                if not skip:
+                    new_lines.append(line)
+            self.schema_context = "\n".join(new_lines)
+
+    # ---------------------------------------------
+    # Summary & refresh
+    # ---------------------------------------------
     def get_database_summary(self) -> str:
-        """Get a summary of the database contents."""
         try:
-            # Get counts
             income_count = len(self.db.get_income())
             expense_count = len(self.db.get_expenses())
-            
-            # Get current month summary
             today = date.today()
             first_day = date(today.year, today.month, 1)
             last_day = date(today.year, today.month, monthrange(today.year, today.month)[1])
-            
             summary = self.db.get_summary(start_date=first_day.isoformat(), end_date=last_day.isoformat())
-            
+
             return f"""
 Database Summary:
-- Total Income Records: {income_count}
-- Total Expense Records: {expense_count}
-- Current Month Income: {summary.get('total_income', 0):.2f} {summary.get('currency', 'INR')}
-- Current Month Expenses: {summary.get('total_expense', 0):.2f} {summary.get('currency', 'INR')}
-- Current Month Balance: {summary.get('balance', 0):.2f} {summary.get('currency', 'INR')}
+- Income Records: {income_count}
+- Expense Records: {expense_count}
+- This Month Income: ₹{summary.get('total_income', 0):,.2f}
+- This Month Expense: ₹{summary.get('total_expense', 0):,.2f}
+- Balance: ₹{summary.get('balance', 0):,.2f}
 """
         except Exception as e:
-            return f"Could not generate database summary: {str(e)}"
-    
-    def update_model(self, ollama_model: str, ollama_base_url: str = None):
-        """Update the LLM model being used and refresh schema context.
-        
-        Args:
-            ollama_model: New model name
-            ollama_base_url: New base URL (optional)
-        """
+            return f"Could not fetch summary: {e}"
+
+    def update_model(self, ollama_model: str, ollama_base_url: Optional[str] = None):
         self.ollama_model = ollama_model
         if ollama_base_url:
             self.ollama_base_url = ollama_base_url
-        
-        # Refresh schema context (in case database has changed)
         self._load_schema_context()
-        
-        # Reinitialize agent with new model and refreshed schema
         self._initialize_agent()
-    
+
     def refresh_schema(self):
-        """Manually refresh the database schema context."""
         self._load_schema_context()
-        # Reinitialize agent to use new schema
         self._initialize_agent()
+
+
+# Quick test
+# if __name__ == "__main__":
+#     rag = ExpenseSQLRAG()
+#     res = rag.query("How much do I have left after expenses this month?")
+#     print("\nAnswer:", res.get("answer"))
