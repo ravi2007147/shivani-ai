@@ -286,13 +286,13 @@ class ExpenseDB:
             conn.close()
             return False, f"❌ Error adding income: {str(e)}"
     
-    def get_income(self, start_date: str = None, end_date: str = None, category_id: int = None) -> List[Dict]:
+    def get_income(self, start_date: str = None, end_date: str = None, category_id: int = None, source_id: int = None) -> List[Dict]:
         """Get income records with filters."""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         query = """
-            SELECT i.id, i.date, i.amount, i.currency, i.note, c.name as category_name, s.name as source_name
+            SELECT i.id, i.date, i.amount, i.currency, i.note, c.name as category_name, s.name as source_name, i.category_id, i.source_id
             FROM income i
             JOIN categories c ON i.category_id = c.id
             LEFT JOIN sources s ON i.source_id = s.id
@@ -309,6 +309,9 @@ class ExpenseDB:
         if category_id:
             query += " AND i.category_id = ?"
             params.append(category_id)
+        if source_id:
+            query += " AND i.source_id = ?"
+            params.append(source_id)
         
         query += " ORDER BY i.date DESC, i.id DESC"
         
@@ -370,7 +373,7 @@ class ExpenseDB:
         cursor = conn.cursor()
         
         query = """
-            SELECT e.id, e.date, e.amount, e.currency, e.note, c.name as category_name, a.name as account_name
+            SELECT e.id, e.date, e.amount, e.currency, e.note, c.name as category_name, a.name as account_name, e.category_id, e.account_id
             FROM expense e
             JOIN categories c ON e.category_id = c.id
             JOIN accounts a ON e.account_id = a.id

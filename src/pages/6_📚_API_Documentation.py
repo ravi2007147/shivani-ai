@@ -94,158 +94,204 @@ def make_api_call(method: str, url: str, json_body: dict = None):
     except requests.exceptions.RequestException as e:
         return None, {"error": str(e)}
 
-# Display each endpoint
-for path in paths_to_show:
-    path_data = openapi_schema["paths"][path]
+# Group endpoints by category
+def categorize_endpoint(path: str, method: str) -> str:
+    """Categorize an endpoint into a group."""
+    if path in ["/api/income-categories", "/api/expense-categories", "/api/accounts", "/api/sources"]:
+        return "Reference Data"
+    elif path == "/api/income" or path.startswith("/api/income/"):
+        return "Income Management"
+    elif path == "/api/expense" or path.startswith("/api/expense/"):
+        return "Expense Management"
+    elif path in ["/api/health", "/"]:
+        return "System"
+    else:
+        return "Other"
+
+# Helper function to display an endpoint
+def display_endpoint(path: str, method: str, details: dict, api_base_url: str, expanded: bool = False):
+    """Display a single endpoint with all its details."""
+    method_upper = method.upper()
+    method_colors = {
+        "GET": "🟢",
+        "POST": "🔵",
+        "PUT": "🟡",
+        "DELETE": "🔴",
+        "PATCH": "🟠"
+    }
+    method_emoji = method_colors.get(method_upper, "⚪")
     
+    # Create expander for each endpoint
+    endpoint_id = f"{method_upper}_{path}"
+    with st.expander(f"{method_emoji} **{method_upper}** `{path}`", expanded=expanded):
+        # Description
+        description = details.get("summary", "") or details.get("description", "No description available")
+        st.markdown(f"**Description:** {description}")
+        
+        # Parameters
+        parameters = details.get("parameters", [])
+        if parameters:
+            st.markdown("#### 📋 Parameters")
+            params_data = []
+            for param in parameters:
+                params_data.append({
+                    "Name": param.get("name", ""),
+                    "Location": param.get("in", ""),
+                    "Required": "Yes" if param.get("required", False) else "No",
+                    "Type": param.get("schema", {}).get("type", "string"),
+                    "Description": param.get("description", "")
+                })
+            st.table(params_data)
+        
+        # Request Body (for POST, PUT, etc.)
+        request_body = details.get("requestBody", {})
+        if request_body:
+            st.markdown("#### 📤 Request Body")
+            content = request_body.get("content", {})
+            for content_type, schema_info in content.items():
+                st.markdown(f"**Content Type:** `{content_type}`")
+                schema = schema_info.get("schema", {})
+                if schema:
+                    st.json(schema)
+        
+        # Response Schema
+        responses = details.get("responses", {})
+        if responses:
+            st.markdown("#### 📥 Responses")
+            for status_code, response_info in responses.items():
+                st.markdown(f"**{status_code}** - {response_info.get('description', '')}")
+                content = response_info.get("content", {})
+                if content:
+                    for content_type, schema_info in content.items():
+                        schema = schema_info.get("schema", {})
+                        if schema:
+                            with st.expander(f"View {status_code} response schema"):
+                                st.json(schema)
+        
+        # Try it out section
+        st.markdown("---")
+        st.markdown("#### 🧪 Try it out")
+        
+        # Build full URL
+        full_url = f"{api_base_url}{path}"
+        
+        # For POST/PUT requests, show JSON input
+        json_input = None
+        if method_upper in ["POST", "PUT", "PATCH"]:
+            request_body = details.get("requestBody", {})
+            if request_body:
+                # Generate example JSON from schema
+                content = request_body.get("content", {})
+                if "application/json" in content:
+                    schema = content["application/json"].get("schema", {})
+                    example_json = {}
+                    
+                    # Try to extract properties from schema
+                    if "properties" in schema:
+                        properties = schema.get("properties", {})
+                        for prop_name, prop_schema in properties.items():
+                            prop_type = prop_schema.get("type", "string")
+                            default_value = prop_schema.get("default")
+                            
+                            # Use default if available
+                            if default_value is not None:
+                                example_json[prop_name] = default_value
+                            elif prop_type == "string":
+                                # Provide better examples based on field name
+                                if "date" in prop_name.lower():
+                                    from datetime import date
+                                    example_json[prop_name] = date.today().isoformat()
+                                elif "currency" in prop_name.lower():
+                                    example_json[prop_name] = "INR"
+                                else:
+                                    example_json[prop_name] = ""
+                            elif prop_type == "integer":
+                                if "id" in prop_name.lower():
+                                    example_json[prop_name] = 1  # Example ID
+                                else:
+                                    example_json[prop_name] = 0
+                            elif prop_type == "number":
+                                if "amount" in prop_name.lower():
+                                    example_json[prop_name] = 1000.0  # Example amount
+                                else:
+                                    example_json[prop_name] = 0.0
+                            elif prop_type == "boolean":
+                                example_json[prop_name] = False
+                            else:
+                                example_json[prop_name] = None
+                    
+                    # Show JSON input
+                    json_input_text = st.text_area(
+                        "Request Body (JSON):",
+                        value=json.dumps(example_json, indent=2),
+                        height=150,
+                        key=f"json_input_{endpoint_id}",
+                        help="Edit the JSON payload for this request"
+                    )
+                    
+                    try:
+                        json_input = json.loads(json_input_text)
+                    except json.JSONDecodeError as e:
+                        st.error(f"Invalid JSON: {str(e)}")
+                        json_input = None
+        
+        # Show URL and send button
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.code(full_url, language="bash")
+        with col2:
+            button_disabled = (method_upper in ["POST", "PUT", "PATCH"] and json_input is None)
+            if st.button("▶️ Send Request", key=f"test_{endpoint_id}", type="primary", disabled=button_disabled):
+                with st.spinner("Calling API..."):
+                    status_code, response_data = make_api_call(method_upper, full_url, json_input)
+                    
+                    if status_code:
+                        if status_code >= 200 and status_code < 300:
+                            st.success(f"✅ Status Code: {status_code}")
+                        else:
+                            st.warning(f"⚠️ Status Code: {status_code}")
+                        st.markdown("**Response:**")
+                        st.json(response_data)
+                    else:
+                        st.error("❌ Request Failed")
+                        st.json(response_data)
+
+
+# Organize endpoints by category
+endpoint_groups = {}
+for path in paths_to_show:
+    path_data = openapi_schema["paths"].get(path, {})
     for method, details in path_data.items():
         if method not in ["get", "post", "put", "delete", "patch"]:
             continue
+        category = categorize_endpoint(path, method)
+        if category not in endpoint_groups:
+            endpoint_groups[category] = []
+        endpoint_groups[category].append((path, method, details))
+
+# Display endpoints grouped by category
+group_order = ["Reference Data", "Income Management", "Expense Management", "System", "Other"]
+for group_name in group_order:
+    if group_name in endpoint_groups and endpoint_groups[group_name]:
+        st.markdown(f"## 📦 {group_name}")
+        st.markdown("---")
         
-        method_upper = method.upper()
-        method_colors = {
-            "GET": "🟢",
-            "POST": "🔵",
-            "PUT": "🟡",
-            "DELETE": "🔴",
-            "PATCH": "🟠"
-        }
-        method_emoji = method_colors.get(method_upper, "⚪")
+        # Display group description
+        if group_name == "Reference Data":
+            st.info("These endpoints provide reference data for categories, accounts, and sources used in income and expense management.")
+        elif group_name == "Income Management":
+            st.info("These endpoints allow you to manage income records: list, create, update, and delete income transactions.")
+        elif group_name == "Expense Management":
+            st.info("These endpoints allow you to manage expense records: list, create, update, and delete expense transactions.")
+        elif group_name == "System":
+            st.info("System endpoints for health checks and API information.")
         
-        # Create expander for each endpoint
-        endpoint_id = f"{method_upper}_{path}"
-        with st.expander(f"{method_emoji} **{method_upper}** `{path}`", expanded=(len(paths_to_show) == 1)):
-            # Description
-            description = details.get("summary", "") or details.get("description", "No description available")
-            st.markdown(f"**Description:** {description}")
-            
-            # Parameters
-            parameters = details.get("parameters", [])
-            if parameters:
-                st.markdown("#### 📋 Parameters")
-                params_data = []
-                for param in parameters:
-                    params_data.append({
-                        "Name": param.get("name", ""),
-                        "Location": param.get("in", ""),
-                        "Required": "Yes" if param.get("required", False) else "No",
-                        "Type": param.get("schema", {}).get("type", "string"),
-                        "Description": param.get("description", "")
-                    })
-                st.table(params_data)
-            
-            # Request Body (for POST, PUT, etc.)
-            request_body = details.get("requestBody", {})
-            if request_body:
-                st.markdown("#### 📤 Request Body")
-                content = request_body.get("content", {})
-                for content_type, schema_info in content.items():
-                    st.markdown(f"**Content Type:** `{content_type}`")
-                    schema = schema_info.get("schema", {})
-                    if schema:
-                        st.json(schema)
-            
-            # Response Schema
-            responses = details.get("responses", {})
-            if responses:
-                st.markdown("#### 📥 Responses")
-                for status_code, response_info in responses.items():
-                    st.markdown(f"**{status_code}** - {response_info.get('description', '')}")
-                    content = response_info.get("content", {})
-                    if content:
-                        for content_type, schema_info in content.items():
-                            schema = schema_info.get("schema", {})
-                            if schema:
-                                with st.expander(f"View {status_code} response schema"):
-                                    st.json(schema)
-            
-            # Try it out section
-            st.markdown("---")
-            st.markdown("#### 🧪 Try it out")
-            
-            # Build full URL
-            full_url = f"{api_base_url}{path}"
-            
-            # For POST/PUT requests, show JSON input
-            json_input = None
-            if method_upper in ["POST", "PUT", "PATCH"]:
-                request_body = details.get("requestBody", {})
-                if request_body:
-                    # Generate example JSON from schema
-                    content = request_body.get("content", {})
-                    if "application/json" in content:
-                        schema = content["application/json"].get("schema", {})
-                        example_json = {}
-                        
-                        # Try to extract properties from schema
-                        if "properties" in schema:
-                            properties = schema.get("properties", {})
-                            for prop_name, prop_schema in properties.items():
-                                prop_type = prop_schema.get("type", "string")
-                                default_value = prop_schema.get("default")
-                                
-                                # Use default if available
-                                if default_value is not None:
-                                    example_json[prop_name] = default_value
-                                elif prop_type == "string":
-                                    # Provide better examples based on field name
-                                    if "date" in prop_name.lower():
-                                        from datetime import date
-                                        example_json[prop_name] = date.today().isoformat()
-                                    elif "currency" in prop_name.lower():
-                                        example_json[prop_name] = "INR"
-                                    else:
-                                        example_json[prop_name] = ""
-                                elif prop_type == "integer":
-                                    if "id" in prop_name.lower():
-                                        example_json[prop_name] = 1  # Example ID
-                                    else:
-                                        example_json[prop_name] = 0
-                                elif prop_type == "number":
-                                    if "amount" in prop_name.lower():
-                                        example_json[prop_name] = 1000.0  # Example amount
-                                    else:
-                                        example_json[prop_name] = 0.0
-                                elif prop_type == "boolean":
-                                    example_json[prop_name] = False
-                                else:
-                                    example_json[prop_name] = None
-                        
-                        # Show JSON input
-                        json_input_text = st.text_area(
-                            "Request Body (JSON):",
-                            value=json.dumps(example_json, indent=2),
-                            height=150,
-                            key=f"json_input_{endpoint_id}",
-                            help="Edit the JSON payload for this request"
-                        )
-                        
-                        try:
-                            json_input = json.loads(json_input_text)
-                        except json.JSONDecodeError as e:
-                            st.error(f"Invalid JSON: {str(e)}")
-                            json_input = None
-            
-            # Show URL and send button
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.code(full_url, language="bash")
-            with col2:
-                button_disabled = (method_upper in ["POST", "PUT", "PATCH"] and json_input is None)
-                if st.button("▶️ Send Request", key=f"test_{endpoint_id}", type="primary", disabled=button_disabled):
-                    with st.spinner("Calling API..."):
-                        status_code, response_data = make_api_call(method_upper, full_url, json_input)
-                        
-                        if status_code:
-                            if status_code >= 200 and status_code < 300:
-                                st.success(f"✅ Status Code: {status_code}")
-                            else:
-                                st.warning(f"⚠️ Status Code: {status_code}")
-                            st.markdown("**Response:**")
-                            st.json(response_data)
-                        else:
-                            st.error("❌ Request Failed")
-                            st.json(response_data)
+        for idx, (path, method, details) in enumerate(endpoint_groups[group_name]):
+            # Only expand first endpoint in each group if showing all
+            expanded = (len(paths_to_show) == len(endpoints) and idx == 0)
+            display_endpoint(path, method, details, api_base_url, expanded=expanded)
+        
+        st.markdown("")  # Add spacing between groups
 
 # Also show actual current data from database
 st.markdown("---")
