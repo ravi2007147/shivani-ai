@@ -53,6 +53,15 @@ class ExpenseDB:
             )
         """)
         
+        # Sources table (for income sources)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Income table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS income (
@@ -62,8 +71,10 @@ class ExpenseDB:
                 amount REAL NOT NULL CHECK(amount > 0),
                 currency TEXT NOT NULL DEFAULT 'INR',
                 note TEXT,
+                source_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
+                FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE RESTRICT
             )
         """)
         
@@ -96,10 +107,17 @@ class ExpenseDB:
         except sqlite3.OperationalError:
             pass  # Column already exists
         
+        # Migrate existing data: add source_id column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE income ADD COLUMN source_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
         # Insert default categories and accounts if they don't exist
         default_income_cats = ['Allowance', 'Salary', 'Petty cash', 'Bonus', 'Other']
         default_expense_cats = ['Food', 'Transportation', 'Household', 'Apparel', 'Education']
         default_accounts = ['Cash', 'Bank Accounts', 'Card']
+        default_sources = ['Employer', 'Freelance', 'Investment', 'Gift', 'Other']
         
         for cat in default_income_cats:
             try:
@@ -116,6 +134,12 @@ class ExpenseDB:
         for acc in default_accounts:
             try:
                 cursor.execute("INSERT INTO accounts (name) VALUES (?)", (acc,))
+            except sqlite3.IntegrityError:
+                pass
+        
+        for src in default_sources:
+            try:
+                cursor.execute("INSERT INTO sources (name) VALUES (?)", (src,))
             except sqlite3.IntegrityError:
                 pass
         
@@ -205,15 +229,54 @@ class ExpenseDB:
             conn.close()
             return False, f"❌ Error deleting account: {str(e)}"
     
+    # Source management
+    def add_source(self, name: str) -> tuple[bool, str]:
+        """Add a new source."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO sources (name) VALUES (?)", (name,))
+            conn.commit()
+            conn.close()
+            return True, f"✅ Source '{name}' added"
+        except sqlite3.IntegrityError:
+            conn.close()
+            return False, f"❌ Source '{name}' already exists"
+        except Exception as e:
+            conn.close()
+            return False, f"❌ Error adding source: {str(e)}"
+    
+    def get_sources(self) -> List[Dict]:
+        """Get all sources."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sources ORDER BY name")
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def delete_source(self, source_id: int) -> tuple[bool, str]:
+        """Delete a source."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            conn.commit()
+            conn.close()
+            return True, "✅ Source deleted"
+        except Exception as e:
+            conn.close()
+            return False, f"❌ Error deleting source: {str(e)}"
+    
     # Income management
-    def add_income(self, date: str, category_id: int, amount: float, currency: str = 'INR', note: str = None) -> tuple[bool, str]:
+    def add_income(self, date: str, category_id: int, amount: float, currency: str = 'INR', note: str = None, source_id: int = None) -> tuple[bool, str]:
         """Add income record."""
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "INSERT INTO income (date, category_id, amount, currency, note) VALUES (?, ?, ?, ?, ?)",
-                (date, category_id, amount, currency, note)
+                "INSERT INTO income (date, category_id, amount, currency, note, source_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (date, category_id, amount, currency, note, source_id)
             )
             conn.commit()
             income_id = cursor.lastrowid
@@ -229,9 +292,10 @@ class ExpenseDB:
         cursor = conn.cursor()
         
         query = """
-            SELECT i.id, i.date, i.amount, i.currency, i.note, c.name as category_name
+            SELECT i.id, i.date, i.amount, i.currency, i.note, c.name as category_name, s.name as source_name
             FROM income i
             JOIN categories c ON i.category_id = c.id
+            LEFT JOIN sources s ON i.source_id = s.id
             WHERE 1=1
         """
         params = []
@@ -253,14 +317,14 @@ class ExpenseDB:
         conn.close()
         return [dict(row) for row in rows]
     
-    def update_income(self, income_id: int, date: str, category_id: int, amount: float, currency: str = 'INR', note: str = None) -> tuple[bool, str]:
+    def update_income(self, income_id: int, date: str, category_id: int, amount: float, currency: str = 'INR', note: str = None, source_id: int = None) -> tuple[bool, str]:
         """Update income record."""
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "UPDATE income SET date = ?, category_id = ?, amount = ?, currency = ?, note = ? WHERE id = ?",
-                (date, category_id, amount, currency, note, income_id)
+                "UPDATE income SET date = ?, category_id = ?, amount = ?, currency = ?, note = ?, source_id = ? WHERE id = ?",
+                (date, category_id, amount, currency, note, source_id, income_id)
             )
             conn.commit()
             conn.close()

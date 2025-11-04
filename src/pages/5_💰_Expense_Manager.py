@@ -88,7 +88,7 @@ with st.sidebar:
             else:
                 st.warning("⚠️ Could not fetch models. Make sure Ollama is running.")
 
-def generate_note_with_ai(data_type: str, date: str, category: str, amount: float, account: str = None, ollama_model: str = None, ollama_base_url: str = None) -> str:
+def generate_note_with_ai(data_type: str, date: str, category: str, amount: float, account: str = None, source: str = None, ollama_model: str = None, ollama_base_url: str = None) -> str:
     """Generate a descriptive note using AI based on income/expense data.
     
     The note is designed to be descriptive and useful for RAG queries later.
@@ -99,6 +99,7 @@ def generate_note_with_ai(data_type: str, date: str, category: str, amount: floa
         category: Category name
         amount: Amount of the transaction
         account: Account name (only for expenses)
+        source: Source name (only for income)
         ollama_model: Ollama model name
         ollama_base_url: Ollama base URL
         
@@ -112,10 +113,11 @@ def generate_note_with_ai(data_type: str, date: str, category: str, amount: floa
         )
         
         if data_type == 'income':
+            source_info = f"\n- Source: {source}" if source else ""
             prompt = f"""Create a simple, factual note for an income transaction. 
 
 Given only:
-- Category: {category}
+- Category: {category}{source_info}
 - Amount: {amount}
 - Date: {date}
 
@@ -187,6 +189,16 @@ with tab1:
                 st.warning("No income categories available. Add categories in Settings tab.")
                 income_category_id = None
             
+            # Source dropdown
+            sources = db.get_sources()
+            source_options = {src['name']: src['id'] for src in sources}
+            if source_options:
+                income_source_name = st.selectbox("Source", options=['None'] + list(source_options.keys()), key="income_source")
+                income_source_id = source_options[income_source_name] if income_source_name != 'None' else None
+            else:
+                st.warning("No sources available. Add sources in Settings tab.")
+                income_source_id = None
+            
             col_amount, col_currency = st.columns([3, 1])
             with col_amount:
                 income_amount = st.number_input("Amount", min_value=0.01, step=0.01, format="%.2f", key="income_amount")
@@ -213,13 +225,15 @@ with tab1:
                     st.error("⚠️ Please enter an amount first")
                 else:
                     with st.spinner("🤖 Generating note with AI..."):
-                        # Use the current form values (category name, amount, date)
+                        # Use the current form values (category name, amount, date, source)
                         category_name = income_category_name  # Use the selected category name from form
+                        source_name = income_source_name if income_source_name != 'None' else None
                         generated_note = generate_note_with_ai(
                             data_type='income',
                             date=income_date.isoformat(),
                             category=category_name,
                             amount=float(income_amount),
+                            source=source_name,
                             ollama_model=ollama_model,
                             ollama_base_url=ollama_base_url
                         )
@@ -234,7 +248,8 @@ with tab1:
                     category_id=income_category_id,
                     amount=float(income_amount),
                     currency=income_currency,
-                    note=income_note if income_note else None
+                    note=income_note if income_note else None,
+                    source_id=income_source_id
                 )
                 if success:
                     st.success(message)
@@ -341,6 +356,8 @@ with tab1:
                     currency_symbol = get_currency_symbol(currency)
                     st.write(f"**Date:** {record['date']}")
                     st.write(f"**Category:** {record['category_name']}")
+                    if record.get('source_name'):
+                        st.write(f"**Source:** {record['source_name']}")
                     st.write(f"**Amount:** {currency_symbol}{record['amount']:.2f} ({currency})")
                     if record['note']:
                         st.write(f"**Note:** {record['note']}")
@@ -373,6 +390,23 @@ with tab1:
                             key=f"edit_income_category_{record['id']}"
                         )
                         edit_income_category_id = edit_income_category_options[edit_income_category_name]
+                        
+                        # Source dropdown in edit form
+                        edit_sources = db.get_sources()
+                        edit_source_options = {src['name']: src['id'] for src in edit_sources}
+                        if edit_source_options:
+                            current_source_name = record.get('source_name', 'None')
+                            source_options_list = ['None'] + list(edit_source_options.keys())
+                            edit_income_source_name = st.selectbox(
+                                "Source",
+                                options=source_options_list,
+                                index=source_options_list.index(current_source_name) if current_source_name in source_options_list else 0,
+                                key=f"edit_income_source_{record['id']}"
+                            )
+                            edit_income_source_id = edit_source_options[edit_income_source_name] if edit_income_source_name != 'None' else None
+                        else:
+                            edit_income_source_id = None
+                        
                         edit_col_amount, edit_col_currency = st.columns([3, 1])
                         with edit_col_amount:
                             edit_income_amount = st.number_input("Amount", min_value=0.01, step=0.01, value=float(record['amount']), format="%.2f", key=f"edit_income_amount_{record['id']}")
@@ -395,7 +429,8 @@ with tab1:
                                     category_id=edit_income_category_id,
                                     amount=float(edit_income_amount),
                                     currency=edit_income_currency,
-                                    note=edit_income_note if edit_income_note else None
+                                    note=edit_income_note if edit_income_note else None,
+                                    source_id=edit_income_source_id
                                 )
                                 if success:
                                     st.success(message)
@@ -935,3 +970,39 @@ with tab4:
                         st.error(message)
     else:
         st.info("No accounts") 
+    
+    st.markdown("---")
+    
+    # Source Management
+    st.subheader("📥 Source Management")
+    
+    st.markdown("### Add Source")
+    with st.form("add_source_form", clear_on_submit=True):
+        new_source_name = st.text_input("Source Name", key="new_source")
+        submit_source = st.form_submit_button("➕ Add Source")
+        
+        if submit_source and new_source_name:
+            success, message = db.add_source(new_source_name)
+            if success:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+    
+    st.markdown("### Existing Sources")
+    sources = db.get_sources()
+    if sources:
+        for src in sources:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"📥 {src['name']}")
+            with col2:
+                if st.button("🗑️ Delete", key=f"delete_source_{src['id']}"):
+                    success, message = db.delete_source(src['id'])
+                    if success:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+    else:
+        st.info("No sources") 
