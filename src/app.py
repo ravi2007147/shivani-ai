@@ -118,6 +118,7 @@ def load_all_knowledge_bases(
     profile_ids: list = None,
 ) -> bool:
     """Load all persisted knowledge bases and make them active.
+    Also automatically includes database schema as a knowledge base document.
     
     Args:
         embedding_model: Name of embedding model to use
@@ -177,6 +178,47 @@ def load_all_knowledge_bases(
                 # Skip this KB if it fails to load
                 print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Failed to load - {str(e)}")
                 continue
+    
+    # Automatically add database schema as a knowledge base document
+    try:
+        from src.utils.db_schema_loader import get_database_schema_document
+        from langchain_core.documents import Document
+        
+        schema_doc = get_database_schema_document()
+        schema_document = Document(page_content=schema_doc, metadata={"source": "database_schema", "type": "schema"})
+        
+        # Create a temporary vectorstore for the schema
+        # Use the first profile or default
+        profile_id_for_schema = profile_ids[0] if profile_ids else "default"
+        schema_manager = VectorStoreManager(profile_id=profile_id_for_schema)
+        
+        # Create a minimal vectorstore with just the schema document
+        from langchain_ollama import OllamaEmbeddings
+        from langchain_chroma import Chroma
+        
+        embeddings = OllamaEmbeddings(
+            model=embedding_model,
+            base_url=ollama_base_url,
+        )
+        
+        # Create unique collection name with timestamp to avoid conflicts
+        import time
+        collection_name = f"db_schema_{int(time.time())}"
+        
+        schema_vectorstore = Chroma.from_documents(
+            documents=[schema_document],
+            embedding=embeddings,
+            collection_name=collection_name,
+            persist_directory=None  # Don't persist, just in memory
+        )
+        
+        loaded_vectorstores.append(schema_vectorstore)
+        loaded_kb_ids.append("db_schema")
+        print(f"[DEBUG] Added database schema to knowledge base")
+    except Exception as e:
+        # If schema loading fails, continue without it
+        print(f"[DEBUG] Could not add database schema: {str(e)}")
+        pass
     
     if not loaded_vectorstores:
         return False
@@ -1189,7 +1231,7 @@ with tab2:
     query_input = st.text_area(
         "Query Text Box",
         height=300,
-        placeholder="Enter your question here... For example:\n\nWhat is artificial intelligence?\n\nWhat are the main concepts?\n\nExplain in detail...",
+        placeholder="Enter your question here...\n\nYou can ask about:\n- Your knowledge base content\n- General questions (direct LLM)\n- Expenses and income (automatic SQL query)\n\nExamples:\n- What is artificial intelligence?\n- What are my expenses this month?\n- Show me income by category",
     )
 
     if st.button("🚀 Run Query", type="primary"):
@@ -1198,56 +1240,101 @@ with tab2:
         else:
             with st.spinner("Processing query..."):
                 try:
-                    # Check if we have a knowledge base (RAG) or just LLM
-                    if st.session_state.knowledge_base_created and st.session_state.rag_pipeline:
-                        # Use RAG: Retrieve relevant documents
-                        result = st.session_state.rag_pipeline.query_with_context(query_input)
-                        
-                        # Display answer
-                        st.subheader("📋 Answer (with RAG context)")
-                        st.markdown("---")
-                        st.markdown(result["answer"])
-                        st.markdown("---")
-
-                        # Display source documents if available
-                        if result.get("context_documents"):
-                            with st.expander("📚 View Source Documents", expanded=False):
-                                for i, doc in enumerate(result["context_documents"][:5], 1):
-                                    st.markdown(f"**Source {i}:**")
-                                    content = doc.page_content
-                                    # Show more content in query tab
-                                    preview_content = content[:800] + "..." if len(content) > 800 else content
-                                    st.text_area(
-                                        f"Content {i}",
-                                        value=preview_content,
-                                        height=150,
-                                        disabled=True,
-                                        key=f"source_{i}"
-                                    )
-                                    st.markdown("---")
-                    else:
-                        # Direct LLM query without RAG
-                        if st.session_state.llm is None:
-                            # Initialize LLM on the fly if not already initialized
-                            st.session_state.llm = OllamaLLM(
-                                model=ollama_model,
-                                base_url=ollama_base_url,
+                    # Auto-detect if query is expense/income related
+                    from src.utils.db_schema_loader import is_expense_related_query
+                    is_expense_query = is_expense_related_query(query_input)
+                    
+                    # Route to SQL RAG if expense-related, otherwise use regular RAG or direct LLM
+                    if is_expense_query:
+                        # Initialize SQL RAG if not already initialized
+                        if 'sql_rag' not in st.session_state or st.session_state.sql_rag is None:
+                            from src.rag.sql_rag import ExpenseSQLRAG
+                            st.session_state.sql_rag = ExpenseSQLRAG(
+                                ollama_model=ollama_model,
+                                ollama_base_url=ollama_base_url
                             )
+                        else:
+                            # Update model if changed
+                            sql_rag = st.session_state.sql_rag
+                            if sql_rag.ollama_model != ollama_model or sql_rag.ollama_base_url != ollama_base_url:
+                                sql_rag.update_model(ollama_model, ollama_base_url)
                         
-                        # Simple prompt for direct query
-                        prompt = f"Question: {query_input}\n\nAnswer:"
-                        answer = st.session_state.llm.invoke(prompt)
+                        # Query the database
+                        result = st.session_state.sql_rag.query(query_input)
                         
                         # Display answer
-                        st.subheader("📋 Answer (direct LLM response)")
-                        st.markdown("---")
-                        st.markdown(answer)
-                        st.markdown("---")
-                        st.info("💡 Tip: Create a knowledge base in the 'Create Knowledge Base' tab for context-aware responses.")
+                        if result.get("success"):
+                            st.subheader("📋 Answer (from Expense Database)")
+                            st.markdown("---")
+                            st.markdown(result["answer"])
+                            st.markdown("---")
+                            
+                            # Show database summary
+                            with st.expander("📊 Database Summary", expanded=False):
+                                summary = st.session_state.sql_rag.get_database_summary()
+                                st.text(summary)
+                        else:
+                            st.error("❌ Error processing query")
+                            st.markdown(result.get("answer", "Unknown error"))
+                            if result.get("error"):
+                                with st.expander("Technical Details"):
+                                    st.code(result["error"])
+                    
+                    else:
+                        # Regular RAG or Direct LLM
+                        # Check if we have a knowledge base (RAG) or just LLM
+                        if st.session_state.knowledge_base_created and st.session_state.rag_pipeline:
+                            # Use RAG: Retrieve relevant documents (includes schema if expense-related)
+                            result = st.session_state.rag_pipeline.query_with_context(query_input)
+                            
+                            # Display answer
+                            st.subheader("📋 Answer (with RAG context)")
+                            st.markdown("---")
+                            st.markdown(result["answer"])
+                            st.markdown("---")
+
+                            # Display source documents if available
+                            if result.get("context_documents"):
+                                with st.expander("📚 View Source Documents", expanded=False):
+                                    for i, doc in enumerate(result["context_documents"][:5], 1):
+                                        st.markdown(f"**Source {i}:**")
+                                        content = doc.page_content
+                                        # Show more content in query tab
+                                        preview_content = content[:800] + "..." if len(content) > 800 else content
+                                        st.text_area(
+                                            f"Content {i}",
+                                            value=preview_content,
+                                            height=150,
+                                            disabled=True,
+                                            key=f"source_{i}"
+                                        )
+                                        st.markdown("---")
+                        else:
+                            # Direct LLM query without RAG
+                            if st.session_state.llm is None:
+                                # Initialize LLM on the fly if not already initialized
+                                st.session_state.llm = OllamaLLM(
+                                    model=ollama_model,
+                                    base_url=ollama_base_url,
+                                )
+                            
+                            # Simple prompt for direct query
+                            prompt = f"Question: {query_input}\n\nAnswer:"
+                            answer = st.session_state.llm.invoke(prompt)
+                            
+                            # Display answer
+                            st.subheader("📋 Answer (direct LLM response)")
+                            st.markdown("---")
+                            st.markdown(answer)
+                            st.markdown("---")
+                            st.info("💡 Tip: Create a knowledge base in the 'Create Knowledge Base' tab for context-aware responses.")
 
                 except Exception as e:
                     st.error(f"Error processing query: {str(e)}")
                     st.info("Make sure Ollama is running locally and the model is available.")
+                    import traceback
+                    with st.expander("Technical Details"):
+                        st.code(traceback.format_exc())
 
 # Footer
 st.markdown("---")
