@@ -21,7 +21,7 @@ from src.config import (
     DEFAULT_LLM_MODEL,
     DEFAULT_EMBEDDING_MODEL,
 )
-from src.utils import fetch_ollama_models, get_default_model, find_persisted_knowledge_base
+from src.utils import fetch_ollama_models, get_default_model, find_persisted_knowledge_base, start_api_server, is_api_server_running
 from src.utils.kb_manager import KnowledgeBaseManager
 from src.rag import VectorStoreManager, RAGPipeline
 
@@ -601,6 +601,18 @@ def initialize_llm_for_direct_query(ollama_model: str, ollama_base_url: str) -> 
 # Initialize session state
 initialize_session_state()
 
+# Start API server automatically
+if 'api_server_started' not in st.session_state:
+    # Check if API server is already running (maybe started manually)
+    if not is_api_server_running():
+        # Start the API server in background
+        if start_api_server():
+            st.session_state.api_server_started = True
+        else:
+            st.session_state.api_server_started = False
+    else:
+        st.session_state.api_server_started = True
+
 # Try to load ALL persisted knowledge bases on startup (all KBs should be active)
 if not st.session_state.knowledge_base_created and not st.session_state.vectorstores:
     # We'll load all KBs after config is available in sidebar
@@ -641,6 +653,13 @@ if 'query_profiles' not in st.session_state:
 
 # Sidebar for configuration
 with st.sidebar:
+    # API Server Status
+    if is_api_server_running():
+        st.success("✅ API Server: Running at http://127.0.0.1:8000")
+    else:
+        st.error("❌ API Server: Not running")
+    
+    st.markdown("---")
     st.header("Configuration")
     ollama_base_url = st.text_input(
         "Ollama Base URL",

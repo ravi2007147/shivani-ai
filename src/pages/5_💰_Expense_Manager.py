@@ -88,7 +88,7 @@ with st.sidebar:
             else:
                 st.warning("⚠️ Could not fetch models. Make sure Ollama is running.")
 
-def generate_note_with_ai(data_type: str, date: str, category: str, amount: float, account: str = None, source: str = None, ollama_model: str = None, ollama_base_url: str = None) -> str:
+def generate_note_with_ai(data_type: str, date: str, category: str, amount: float, currency: str = 'INR', account: str = None, source: str = None, ollama_model: str = None, ollama_base_url: str = None) -> str:
     """Generate a descriptive note using AI based on income/expense data.
     
     The note is designed to be descriptive and useful for RAG queries later.
@@ -98,6 +98,7 @@ def generate_note_with_ai(data_type: str, date: str, category: str, amount: floa
         date: Date of the transaction
         category: Category name
         amount: Amount of the transaction
+        currency: Currency code (default: 'INR')
         account: Account name (only for expenses)
         source: Source name (only for income)
         ollama_model: Ollama model name
@@ -113,31 +114,54 @@ def generate_note_with_ai(data_type: str, date: str, category: str, amount: floa
         )
         
         if data_type == 'income':
-            source_info = f"\n- Source: {source}" if source else ""
-            prompt = f"""Create a simple, factual note for an income transaction. 
+            currency_symbol = get_currency_symbol(currency)
+            formatted_amount = f"{currency_symbol}{amount:,.2f}"
+            
+            # Build descriptive prompt with all details
+            source_details = f" received from {source}" if source else ""
+            prompt = f"""Create a descriptive, factual note for an income transaction that will be used for personal finance tracking.
 
-Given only:
-- Category: {category}{source_info}
-- Amount: {amount}
+Transaction Details:
+- Transaction Type: Income
+- Category: {category}
+- Source: {source if source else 'Not specified'}
+- Amount: {formatted_amount} ({currency})
 - Date: {date}
 
-Generate a brief, simple note (1 sentence) that just describes the income in a straightforward way. Do NOT invent any details, locations, or specifics that were not provided. Only use the information given.
+Instructions:
+Generate a clear, descriptive note (1-2 sentences) that naturally incorporates:
+1. The category type ({category}) - this describes what kind of income it is
+2. The source ({source if source else 'the income source'}) - this describes where the income came from
+3. The amount ({formatted_amount}) - you MUST include this specific amount
+4. The date ({date}) - you can reference this if relevant
 
-Example format: "Monthly salary payment" or "Bonus received" or "Allowance received"
+Be descriptive and natural. Combine the category and source in a way that reads naturally. For example, if category is "Salary" and source is "Freelance", describe it as "Freelance salary payment" or "Salary income from freelance work". If category is "Bonus" and source is "Company XYZ", describe it as "Bonus received from Company XYZ".
+
+DO NOT invent any details, locations, or specifics that were not provided. Only use the information given above.
 
 Note:"""
         else:  # expense
-            prompt = f"""Create a simple, factual note for an expense transaction.
+            currency_symbol = get_currency_symbol(currency)
+            formatted_amount = f"{currency_symbol}{amount:,.2f}"
+            prompt = f"""Create a descriptive, factual note for an expense transaction that will be used for personal finance tracking.
 
-Given only:
+Transaction Details:
+- Transaction Type: Expense
 - Category: {category}
-- Amount: {amount}
 - Account: {account}
+- Amount: {formatted_amount} ({currency})
 - Date: {date}
 
-Generate a brief, simple note (1 sentence) that just describes the expense in a straightforward way. Do NOT invent any details, store names, locations, or specifics that were not provided. Only use the information given.
+Instructions:
+Generate a clear, descriptive note (1-2 sentences) that naturally incorporates:
+1. The category type ({category}) - this describes what the expense was for
+2. The account ({account}) - this describes which payment method/account was used
+3. The amount ({formatted_amount}) - you MUST include this specific amount
+4. The date ({date}) - you can reference this if relevant
 
-Example format: "Expense for {category}" or "Payment made from {account} for {category}"
+Be descriptive and natural. Combine the category and account in a way that reads naturally. For example, if category is "Food" and account is "Cash", describe it as "Food expense paid with cash" or "Cash payment for food expenses". If category is "Transportation" and account is "Card", describe it as "Transportation expense charged to card" or "Card payment for transportation".
+
+DO NOT invent any details, store names, locations, or specifics that were not provided. Only use the information given above.
 
 Note:"""
         
@@ -233,6 +257,7 @@ with tab1:
                             date=income_date.isoformat(),
                             category=category_name,
                             amount=float(income_amount),
+                            currency=income_currency,
                             source=source_name,
                             ollama_model=ollama_model,
                             ollama_base_url=ollama_base_url
@@ -253,9 +278,7 @@ with tab1:
                 )
                 if success:
                     st.success(message)
-                    # Clear note from session state
-                    st.session_state['income_note'] = ''
-                    # Clear form by rerunning
+                    # Clear form by rerunning (will reset all form fields)
                     st.rerun()
                 else:
                     st.error(message)
@@ -544,6 +567,7 @@ with tab2:
                             date=expense_date.isoformat(),
                             category=category_name,
                             amount=float(expense_amount),
+                            currency=expense_currency,
                             account=account_name,
                             ollama_model=ollama_model,
                             ollama_base_url=ollama_base_url
@@ -564,9 +588,7 @@ with tab2:
                 )
                 if success:
                     st.success(message)
-                    # Clear note from session state
-                    st.session_state['expense_note'] = ''
-                    # Clear form by rerunning
+                    # Clear form by rerunning (will reset all form fields)
                     st.rerun()
                 else:
                     st.error(message)
