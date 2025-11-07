@@ -118,7 +118,9 @@ def load_all_knowledge_bases(
     profile_ids: list = None,
 ) -> bool:
     """Load all persisted knowledge bases and make them active.
-    Also automatically includes database schema as a knowledge base document.
+    
+    Note: Database schema is NOT automatically included. It is only used by SQL RAG
+    for expense-related queries, which loads it separately.
     
     Args:
         embedding_model: Name of embedding model to use
@@ -178,47 +180,6 @@ def load_all_knowledge_bases(
                 # Skip this KB if it fails to load
                 print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Failed to load - {str(e)}")
                 continue
-    
-    # Automatically add database schema as a knowledge base document
-    try:
-        from src.utils.db_schema_loader import get_database_schema_document
-        from langchain_core.documents import Document
-        
-        schema_doc = get_database_schema_document()
-        schema_document = Document(page_content=schema_doc, metadata={"source": "database_schema", "type": "schema"})
-        
-        # Create a temporary vectorstore for the schema
-        # Use the first profile or default
-        profile_id_for_schema = profile_ids[0] if profile_ids else "default"
-        schema_manager = VectorStoreManager(profile_id=profile_id_for_schema)
-        
-        # Create a minimal vectorstore with just the schema document
-        from langchain_ollama import OllamaEmbeddings
-        from langchain_chroma import Chroma
-        
-        embeddings = OllamaEmbeddings(
-            model=embedding_model,
-            base_url=ollama_base_url,
-        )
-        
-        # Create unique collection name with timestamp to avoid conflicts
-        import time
-        collection_name = f"db_schema_{int(time.time())}"
-        
-        schema_vectorstore = Chroma.from_documents(
-            documents=[schema_document],
-            embedding=embeddings,
-            collection_name=collection_name,
-            persist_directory=None  # Don't persist, just in memory
-        )
-        
-        loaded_vectorstores.append(schema_vectorstore)
-        loaded_kb_ids.append("db_schema")
-        print(f"[DEBUG] Added database schema to knowledge base")
-    except Exception as e:
-        # If schema loading fails, continue without it
-        print(f"[DEBUG] Could not add database schema: {str(e)}")
-        pass
     
     if not loaded_vectorstores:
         return False
@@ -1281,10 +1242,11 @@ with tab2:
                                     st.code(result["error"])
                     
                     else:
-                        # Regular RAG or Direct LLM
+                        # Regular RAG or Direct LLM (non-expense queries)
                         # Check if we have a knowledge base (RAG) or just LLM
                         if st.session_state.knowledge_base_created and st.session_state.rag_pipeline:
-                            # Use RAG: Retrieve relevant documents (includes schema if expense-related)
+                            # Use RAG: Retrieve relevant documents from knowledge bases only
+                            # (Database schema is NOT included - it's only used by SQL RAG)
                             result = st.session_state.rag_pipeline.query_with_context(query_input)
                             
                             # Display answer
