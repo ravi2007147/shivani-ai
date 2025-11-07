@@ -179,7 +179,7 @@ class RAGPipeline:
         Returns:
             Answer string
         """
-        prompt = f"Question: {query}\n\nAnswer:"
+        prompt = f"Answer the following question directly and naturally, without any meta-commentary or introductory phrases.\n\nQuestion: {query}\n\nAnswer:"
         answer = self.llm.invoke(prompt)
         return answer
 

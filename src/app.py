@@ -1281,7 +1281,7 @@ with tab2:
                                 )
                             
                             # Simple prompt for direct query
-                            prompt = f"Question: {query_input}\n\nAnswer:"
+                            prompt = f"Answer the following question directly and naturally, without any meta-commentary or introductory phrases.\n\nQuestion: {query_input}\n\nAnswer:"
                             answer = st.session_state.llm.invoke(prompt)
                             
                             # Display answer

@@ -22,11 +22,13 @@ MAX_CONTEXT_LENGTH = 8000  # Maximum context length for LLM
 BATCH_SIZE = 100  # Process embeddings in batches for large texts
 
 # RAG prompt template
-RAG_PROMPT_TEMPLATE = """Use the following pieces of context to answer the question. Answer only with information that is directly relevant to the user’s question. Do not mention or comment on unrelated topics.
-If the question is not related to a topic in context, simply answer based on the question itself.
-If you don’t know, say you don’t know.
+RAG_PROMPT_TEMPLATE = """Answer the question using the information provided below. Answer naturally and directly without mentioning sources, context, or where the information came from. Do not use phrases like "Based on the context", "According to the context", "Based on the information provided", or similar meta-commentary.
+Answer only with information that is directly relevant to the user's question. Do not mention or comment on unrelated topics.
+If the question is not related to the information provided, simply answer based on the question itself.
+If you don't know, say you don't know.
 
-Context: {context}
+Information:
+{context}
 
 Question: {question}
 

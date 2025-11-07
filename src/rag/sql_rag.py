@@ -111,7 +111,9 @@ STYLE & OUTPUT:
 - Use table names exactly: income, expense, categories, accounts, sources.
 - For "this month", use CURRENT CONTEXT above.
 - Return amounts in INR with commas and two decimals (e.g., ₹11,500.00).
-- Do not include markdown, code blocks, or commentary in final answer.
+- Answer naturally and directly without meta-commentary like "Based on the context", "According to the database", "Based on the query results", or similar phrases.
+- Do not include markdown, code blocks, or technical commentary in final answer.
+- Provide a clear, conversational answer as if you're directly answering the user's question.
 """
 
         self.agent = create_sql_agent(
