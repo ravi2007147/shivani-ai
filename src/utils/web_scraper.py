@@ -7,10 +7,7 @@ from urllib.parse import urlparse
 
 
 def extract_article_from_url(url: str, timeout: int = 10) -> Optional[str]:
-    """Extract article text content from a URL.
-    
-    Uses advanced HTML parsing to extract only the main article content,
-    removing navigation, ads, and other non-content elements.
+    """Extract article text from a URL.
     
     Args:
         url: The URL to scrape
@@ -20,7 +17,6 @@ def extract_article_from_url(url: str, timeout: int = 10) -> Optional[str]:
         Extracted article text, or None if extraction fails
     """
     try:
-        # Try readability-lxml first (best for article extraction)
         from readability import Document
         return _extract_with_readability(url, timeout, Document)
     except ImportError:
@@ -34,11 +30,7 @@ def extract_article_from_url(url: str, timeout: int = 10) -> Optional[str]:
 
 
 def _extract_with_readability(url: str, timeout: int, Document) -> Optional[str]:
-    """Extract article using readability-lxml library.
-    
-    This is the best method for extracting article content as it
-    uses Mozilla's readability algorithm to identify the main content.
-    """
+    """Extract article using readability-lxml library."""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -62,8 +54,7 @@ def _extract_with_readability(url: str, timeout: int, Document) -> Optional[str]
         
         return text if text else None
         
-    except Exception as e:
-        print(f"Readability extraction failed: {e}")
+    except Exception:
         # Fallback to beautifulsoup
         try:
             from bs4 import BeautifulSoup
@@ -73,13 +64,7 @@ def _extract_with_readability(url: str, timeout: int, Document) -> Optional[str]
 
 
 def _extract_with_beautifulsoup(url: str, timeout: int, BeautifulSoup) -> Optional[str]:
-    """Extract article using beautifulsoup4 library.
-    
-    Uses heuristics to identify the main article content:
-    - Looks for article, main, or content tags
-    - Finds divs with high text density
-    - Removes common non-content elements (nav, aside, script, style, etc.)
-    """
+    """Extract article using beautifulsoup4 library."""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -126,16 +111,12 @@ def _extract_with_beautifulsoup(url: str, timeout: int, BeautifulSoup) -> Option
         
         return text if text else None
         
-    except Exception as e:
-        print(f"BeautifulSoup extraction failed: {e}")
+    except Exception:
         return _extract_basic(url, timeout)
 
 
 def _extract_basic(url: str, timeout: int) -> Optional[str]:
-    """Basic text extraction without special parsing.
-    
-    Last resort method that just gets all text from the page.
-    """
+    """Basic text extraction without special parsing."""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -162,20 +143,12 @@ def _extract_basic(url: str, timeout: int) -> Optional[str]:
         
         return text if text else None
         
-    except Exception as e:
-        print(f"Basic extraction failed: {e}")
+    except Exception:
         return None
 
 
 def _clean_extracted_text(text: str) -> str:
-    """Clean and normalize extracted text.
-    
-    Args:
-        text: Raw extracted text
-        
-    Returns:
-        Cleaned text
-    """
+    """Clean and normalize extracted text."""
     if not text:
         return ""
     

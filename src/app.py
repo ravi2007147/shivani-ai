@@ -146,10 +146,7 @@ def load_all_knowledge_bases(
         kb_list = kb_manager.list_knowledge_bases()
         
         if not kb_list:
-            print(f"[DEBUG] Profile {profile_id}: No knowledge bases found")
             continue
-        
-        print(f"[DEBUG] Profile {profile_id}: Found {len(kb_list)} KB(s)")
         
         # Load all knowledge bases from this profile
         for kb in kb_list:
@@ -157,15 +154,12 @@ def load_all_knowledge_bases(
             kb_id = kb.get("id")
             
             if not persist_dir or not os.path.exists(persist_dir):
-                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Invalid path {persist_dir}")
                 continue
             
             if not os.listdir(persist_dir):
-                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Empty directory")
                 continue
             
             try:
-                # Load vectorstore (create manager with profile_id)
                 profile_manager = VectorStoreManager(profile_id=profile_id)
                 vectorstore = profile_manager.load_vectorstore(
                     persist_dir,
@@ -175,10 +169,7 @@ def load_all_knowledge_bases(
                 
                 loaded_vectorstores.append(vectorstore)
                 loaded_kb_ids.append(f"{profile_id}:{kb_id}")
-                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Loaded successfully")
-            except Exception as e:
-                # Skip this KB if it fails to load
-                print(f"[DEBUG] Profile {profile_id}, KB {kb_id}: Failed to load - {str(e)}")
+            except Exception:
                 continue
     
     if not loaded_vectorstores:
@@ -209,8 +200,6 @@ def load_all_knowledge_bases(
         st.session_state.rag_pipeline = rag_pipeline
         st.session_state.active_kb_ids = loaded_kb_ids
         st.session_state.knowledge_base_created = True
-        
-        print(f"[DEBUG] Successfully loaded {len(loaded_vectorstores)} KB(s): {loaded_kb_ids}")
         
         return True
     except Exception as e:

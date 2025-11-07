@@ -159,8 +159,6 @@ class RAGPipeline:
             context=context,
             question=query
         )
-
-        print("formatted_prompt",formatted_prompt)
         
         # Get answer from LLM
         answer = self.llm.invoke(formatted_prompt)

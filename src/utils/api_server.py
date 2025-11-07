@@ -32,45 +32,35 @@ class APIServerManager:
             self.config = config
             self.server_running = True
             server.run()
-        except Exception as e:
-            print(f"[API Server] Error: {e}")
+        except Exception:
             self.server_running = False
     
     def start(self):
         """Start the API server in a background thread."""
         if self.is_running():
-            print(f"[API Server] Already running at http://{self.host}:{self.port}")
             return True
         
         try:
             self.server_thread = threading.Thread(
                 target=self._run_server,
-                daemon=True,  # Daemon thread will die when main thread dies
+                daemon=True,
                 name="FastAPI-Server"
             )
             self.server_thread.start()
             
-            # Wait a bit and check if server started
+            # Wait for server to start
             max_attempts = 10
             for i in range(max_attempts):
                 time.sleep(0.5)
                 if self.is_running():
-                    print(f"[API Server] Started successfully at http://{self.host}:{self.port}")
                     return True
-                if i == max_attempts - 1:
-                    print(f"[API Server] Warning: Server may not have started correctly")
-                    return False
-            return True
-        except Exception as e:
-            print(f"[API Server] Failed to start: {e}")
+            return False
+        except Exception:
             return False
     
     def stop(self):
         """Stop the API server."""
-        # Since it's a daemon thread, it will stop automatically when main process ends
-        # But we can mark it as stopped
         self.server_running = False
-        print("[API Server] Stopped")
     
     def is_running(self) -> bool:
         """Check if the API server is running by making a health check request."""

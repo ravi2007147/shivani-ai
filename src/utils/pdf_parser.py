@@ -148,12 +148,7 @@ def _extract_metadata_pypdf(pdf_stream, PdfReader) -> Dict[str, str]:
 
 
 def extract_text_from_pdf_stream(pdf_stream) -> str:
-    # 🔍 Debug: show Python environment info
-    print("🔍 Python executable:", sys.executable)
-    print("🔍 sys.path:", sys.path)
-    print("🔍 Current working directory:", os.getcwd())
-
-    """Extract text from a PDF file stream using the best available library.
+    """Extract text from a PDF file stream.
     
     Args:
         pdf_stream: A binary PDF file-like object (e.g. from Streamlit uploader)

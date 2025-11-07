@@ -246,58 +246,34 @@ class VectorStoreManager:
         # 3. Persist to disk
         
         try:
-            # Show where Chroma DB will be created
-            print(f"[DEBUG] =========================================")
-            print(f"[DEBUG] CHROMA DATABASE LOCATION:")
-            print(f"[DEBUG]   Base Directory: {self.base_dir}")
-            print(f"[DEBUG]   Full Persist Path: {persist_dir}")
-            print(f"[DEBUG]   Absolute Path: {os.path.abspath(persist_dir)}")
-            print(f"[DEBUG] =========================================")
-            
-            # Test embedding connection first to catch errors early
+            # Test embedding connection first
             try:
-                print(f"[DEBUG] Testing embedding connection with model '{embedding_model}' at {base_url}...")
-                test_embedding = embeddings.embed_query("test")
-                print(f"[DEBUG] ✅ Embedding test successful. Vector dimension: {len(test_embedding)}")
+                embeddings.embed_query("test")
             except Exception as e:
                 error_msg = f"Failed to connect to embedding model '{embedding_model}' at {base_url}: {str(e)}"
-                print(f"[ERROR] {error_msg}")
                 raise Exception(f"{error_msg}\n\nMake sure:\n1. Ollama is running (check: ollama serve)\n2. The embedding model '{embedding_model}' is installed (check: ollama list)\n3. Ollama API is accessible at {base_url}")
             
-            print(f"[DEBUG] Creating vectorstore with {len(texts)} document chunks")
-            print(f"[DEBUG] Will save to: {persist_dir}")
-            
-            # Create vectorstore - this calls Ollama embedding API for each chunk
-            print(f"[DEBUG] Starting Chroma.from_documents (this will create embeddings via Ollama)...")
+            # Create vectorstore
             vectorstore = Chroma.from_documents(
                 documents=texts,
                 embedding=embeddings,
                 persist_directory=persist_dir,
             )
-            print(f"[DEBUG] ✅ Chroma.from_documents completed successfully")
             
             # Verify the vectorstore has content
             try:
                 count = vectorstore._collection.count()
-                print(f"[DEBUG] ✅ Vectorstore verified: contains {count} document(s)")
                 if count == 0:
-                    raise Exception("Vectorstore was created but contains 0 documents - embedding creation may have failed silently")
-            except (AttributeError, Exception) as e:
-                # Try alternative method to verify
+                    raise Exception("Vectorstore was created but contains 0 documents")
+            except (AttributeError, Exception):
                 try:
-                    # Try a simple search to verify it works
-                    results = vectorstore.similarity_search("test", k=1)
-                    print(f"[DEBUG] ✅ Vectorstore verified: similarity search successful, found {len(results)} result(s)")
-                except Exception as verify_e:
-                    print(f"[WARNING] Could not verify vectorstore: {str(verify_e)}")
-                    # Don't fail if verification fails, might still work
+                    vectorstore.similarity_search("test", k=1)
+                except Exception:
+                    pass
             
         except Exception as e:
-            # If embedding creation fails, provide more context
-            print(f"[ERROR] Failed to create vectorstore: {str(e)}")
             import traceback
             traceback_str = traceback.format_exc()
-            print(f"[ERROR] Full traceback:\n{traceback_str}")
             
             # Provide helpful error message based on error type
             error_str = str(e)
@@ -309,8 +285,7 @@ class VectorStoreManager:
                 raise Exception(f"Failed to create embeddings: {error_str}\n\nMake sure:\n1. Ollama is running (ollama serve)\n2. The embedding model '{embedding_model}' is installed (ollama pull {embedding_model})\n3. Ollama API is accessible at {base_url}")
         
         # Wait for files to be written
-        print(f"[DEBUG] Waiting for Chroma to persist files...")
-        time.sleep(1.0)  # Give Chroma more time to write
+        time.sleep(1.0)
         
         # Fix permissions on created files IMMEDIATELY after creation
         # This is critical - Chroma creates SQLite files that need write access
@@ -331,27 +306,8 @@ class VectorStoreManager:
                             os.chmod(item_path, 0o777)
                     except Exception:
                         pass
-        except Exception as e:
-            print(f"[DEBUG] Warning: Could not fix parent directory permissions: {e}")
-        
-        # Verify files were created
-        print(f"[DEBUG] =========================================")
-        print(f"[DEBUG] VERIFYING CHROMA DATABASE CREATION:")
-        print(f"[DEBUG]   Persist directory exists: {os.path.exists(persist_dir)}")
-        if os.path.exists(persist_dir):
-            all_items = os.listdir(persist_dir)
-            files_created = [f for f in all_items if os.path.isfile(os.path.join(persist_dir, f))]
-            dirs_created = [f for f in all_items if os.path.isdir(os.path.join(persist_dir, f))]
-            print(f"[DEBUG]   Files created: {len(files_created)}")
-            print(f"[DEBUG]   Directories created: {len(dirs_created)}")
-            if files_created:
-                print(f"[DEBUG]   File names: {files_created[:5]}...")  # Show first 5
-            if dirs_created:
-                print(f"[DEBUG]   Directory names: {dirs_created[:5]}...")  # Show first 5
-            print(f"[DEBUG]   Full path: {os.path.abspath(persist_dir)}")
-        else:
-            print(f"[DEBUG]   ⚠️ WARNING: Persist directory does not exist!")
-        print(f"[DEBUG] =========================================")
+        except Exception:
+            pass
         
         return vectorstore, persist_dir
     

@@ -161,12 +161,10 @@ Please follow:
 
         except OutputParserException as e:
             raw_text = getattr(e, "llm_output", None) or str(e)
-            print("[ExpenseSQLRAG] Output parsing error recovered.")
             return {"success": True, "answer": raw_text.strip(), "query": question}
 
         except Exception as e:
             err = str(e)
-            print("[ExpenseSQLRAG] Error:", err)
 
             if SQLITE_MULTI_STMT_ERR in err:
                 try:
@@ -203,9 +201,8 @@ Please follow:
         if len(nums) >= 2:
             try:
                 vals = [float(x.replace(",", "")) for x in nums]
-                if max(vals) > 10 * min(vals):  # suspicious ratio
-                    print("[SanityCheck] Possible double-count detected (JOIN issue).")
-                    return answer + "\n(Note: Possible JOIN double-counting detected. Check using scalar subqueries.)"
+                if max(vals) > 10 * min(vals):
+                    return answer + "\n(Note: Possible calculation issue detected.)"
             except:
                 pass
         return answer
@@ -275,10 +272,3 @@ Database Summary:
     def refresh_schema(self):
         self._load_schema_context()
         self._initialize_agent()
-
-
-# Quick test
-# if __name__ == "__main__":
-#     rag = ExpenseSQLRAG()
-#     res = rag.query("How much do I have left after expenses this month?")
-#     print("\nAnswer:", res.get("answer"))
