@@ -278,7 +278,19 @@ with tab1:
                 )
                 if success:
                     st.success(message)
-                    # Clear form by rerunning (will reset all form fields)
+                    # Clear form fields
+                    if 'income_date' in st.session_state:
+                        del st.session_state['income_date']
+                    if 'income_category' in st.session_state:
+                        del st.session_state['income_category']
+                    if 'income_source' in st.session_state:
+                        del st.session_state['income_source']
+                    if 'income_amount' in st.session_state:
+                        del st.session_state['income_amount']
+                    if 'income_currency' in st.session_state:
+                        del st.session_state['income_currency']
+                    if 'income_note' in st.session_state:
+                        del st.session_state['income_note']
                     st.rerun()
                 else:
                     st.error(message)
@@ -588,7 +600,19 @@ with tab2:
                 )
                 if success:
                     st.success(message)
-                    # Clear form by rerunning (will reset all form fields)
+                    # Clear form fields
+                    if 'expense_date' in st.session_state:
+                        del st.session_state['expense_date']
+                    if 'expense_category' in st.session_state:
+                        del st.session_state['expense_category']
+                    if 'expense_amount' in st.session_state:
+                        del st.session_state['expense_amount']
+                    if 'expense_currency' in st.session_state:
+                        del st.session_state['expense_currency']
+                    if 'expense_account' in st.session_state:
+                        del st.session_state['expense_account']
+                    if 'expense_note' in st.session_state:
+                        del st.session_state['expense_note']
                     st.rerun()
                 else:
                     st.error(message)
