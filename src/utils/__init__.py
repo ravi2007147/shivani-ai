@@ -5,6 +5,7 @@ from .persistence_utils import find_persisted_knowledge_base
 from .text_classifier import PDFClassifier, classify_pdf_content, PDF_CATEGORIES
 from .web_scraper import extract_article_from_url, is_valid_url
 from .expense_db import ExpenseDB
+from .rss_db import RSSDB
 from .api_server import start_api_server, is_api_server_running, get_api_server_url
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "extract_article_from_url",
     "is_valid_url",
     "ExpenseDB",
+    "RSSDB",
     "start_api_server",
     "is_api_server_running",
     "get_api_server_url",
