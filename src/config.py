@@ -1,5 +1,7 @@
 """Configuration constants for the RAG application."""
 
+import os
+
 # Default values
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_LLM_MODEL = "mistral"
@@ -20,6 +22,20 @@ MAX_CONTEXT_LENGTH = 8000  # Maximum context length for LLM
 
 # Batch processing
 BATCH_SIZE = 100  # Process embeddings in batches for large texts
+
+# Auto-discovery configuration
+# Maximum number of URLs to extract content from during auto-discovery
+# Can be overridden by environment variable MAX_URLS_TO_EXTRACT
+MAX_URLS_TO_EXTRACT = int(os.getenv("MAX_URLS_TO_EXTRACT", "3"))
+
+# Maximum number of search results to consider during auto-discovery
+# Can be overridden by environment variable MAX_SEARCH_RESULTS
+MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "10"))
+
+# Maximum number of pages to crawl from the primary website (maximum match website)
+# When a maximum match website is found, the system will crawl multiple pages from that website
+# Can be overridden by environment variable MAX_PAGES_TO_CRAWL
+MAX_PAGES_TO_CRAWL = int(os.getenv("MAX_PAGES_TO_CRAWL", "15"))
 
 # RAG prompt template
 RAG_PROMPT_TEMPLATE = """Answer the question using the information provided below. Answer naturally and directly without mentioning sources, context, or where the information came from. Do not use phrases like "Based on the context", "According to the context", "Based on the information provided", or similar meta-commentary.

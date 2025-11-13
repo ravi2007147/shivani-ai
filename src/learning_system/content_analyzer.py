@@ -11,6 +11,8 @@ from langchain_ollama import OllamaLLM
 from .intent_router import IntentRouter
 from .knowledge_checker import KnowledgeChecker
 from .auto_discovery_agent import AutoDiscoveryAgent
+from src.rag import RAGPipeline # Assuming RAGPipeline can handle multiple vectorstores
+from src.config import MAX_URLS_TO_EXTRACT, MAX_SEARCH_RESULTS, MAX_PAGES_TO_CRAWL
 
 logger = logging.getLogger(__name__)
 
@@ -279,8 +281,9 @@ class ContentAnalyzer:
         vectorstore_manager=None,
         embedding_model: str = "nomic-embed-text",
         profile_id: str = "default",
-        max_search_results: int = 10,
-        max_urls_to_extract: int = 3,
+        max_search_results: int = None,
+        max_urls_to_extract: int = None,
+        max_pages_to_crawl: int = None,
         is_from_url: bool = False
     ) -> Dict[str, Any]:
         """Trigger auto-discovery for a topic.
@@ -298,8 +301,9 @@ class ContentAnalyzer:
             vectorstore_manager: VectorStoreManager instance for storing
             embedding_model: Embedding model name
             profile_id: Profile ID to store knowledge under
-            max_search_results: Maximum number of search results
-            max_urls_to_extract: Maximum number of URLs to extract content from
+            max_search_results: Maximum number of search results (default: from config)
+            max_urls_to_extract: Maximum number of URLs to extract content from (default: from config)
+            max_pages_to_crawl: Maximum number of pages to crawl from primary website (default: from config)
             is_from_url: Whether the topic is from a URL (affects search query format)
             
         Returns:
@@ -311,7 +315,18 @@ class ContentAnalyzer:
                 - kb_id: Knowledge base ID
                 - error: Error message if failed
         """
+        # Use config defaults if not provided
+        if max_search_results is None:
+            max_search_results = MAX_SEARCH_RESULTS
+        if max_urls_to_extract is None:
+            max_urls_to_extract = MAX_URLS_TO_EXTRACT
+        if max_pages_to_crawl is None:
+            max_pages_to_crawl = MAX_PAGES_TO_CRAWL
+        
         logger.info(f"Triggering auto-discovery for topic: {topic} (from_url: {is_from_url})")
+        logger.info(f"   - Max search results: {max_search_results}")
+        logger.info(f"   - Max URLs to extract: {max_urls_to_extract}")
+        logger.info(f"   - Max pages to crawl from primary website: {max_pages_to_crawl}")
         
         try:
             # Use Auto-Discovery Agent to discover and store knowledge
@@ -320,6 +335,7 @@ class ContentAnalyzer:
                 knowledge_template=knowledge_template,
                 max_search_results=max_search_results,
                 max_urls_to_extract=max_urls_to_extract,
+                max_pages_to_crawl=max_pages_to_crawl,
                 vectorstore_manager=vectorstore_manager,
                 embedding_model=embedding_model,
                 profile_id=profile_id,

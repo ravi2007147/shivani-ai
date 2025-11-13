@@ -662,8 +662,13 @@ def _run_auto_discovery(
         # Trigger auto-discovery
         logger.info("🔍 Step 3: Triggering auto-discovery...")
         logger.info(f"   - Topic: {extracted_topic}")
-        logger.info(f"   - Max search results: 10")
-        logger.info(f"   - Max URLs to extract: 3")
+        
+        # Import config to get default values
+        from src.config import MAX_URLS_TO_EXTRACT, MAX_SEARCH_RESULTS, MAX_PAGES_TO_CRAWL
+        
+        logger.info(f"   - Max search results: {MAX_SEARCH_RESULTS}")
+        logger.info(f"   - Max URLs to extract: {MAX_URLS_TO_EXTRACT}")
+        logger.info(f"   - Max pages to crawl from primary website: {MAX_PAGES_TO_CRAWL}")
         logger.info(f"   - Embedding model: {embedding_model}")
         logger.info(f"   - Knowledge template: {'Provided' if json_template_input.strip() else 'None'}")
         
@@ -676,8 +681,9 @@ def _run_auto_discovery(
             vectorstore_manager=vectorstore_manager,
             embedding_model=embedding_model,
             profile_id=profile_id,
-            max_search_results=10,
-            max_urls_to_extract=3,
+            max_search_results=MAX_SEARCH_RESULTS,  # Use config value
+            max_urls_to_extract=MAX_URLS_TO_EXTRACT,  # Use config value
+            max_pages_to_crawl=MAX_PAGES_TO_CRAWL,  # Use config value
             is_from_url=is_from_url  # Pass is_from_url flag
         )
         
