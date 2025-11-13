@@ -837,13 +837,18 @@ with tab1:
     # Input method selection
     input_method = st.radio(
         "Select input method:",
-        ["Manual Text Entry", "Structured Text Entry", "Upload PDF"],
+        ["Manual Text Entry", "Structured Text Entry", "Structured URL Input", "Upload PDF"],
         horizontal=True
     )
     
     kb_title = None
     kb_pdf_metadata = None
     rag_input = ""
+    
+    # Clear URL data usage flag if not using Structured URL Input
+    if input_method != "Structured URL Input":
+        if 'url_data_used_for_kb' in st.session_state:
+            st.session_state.url_data_used_for_kb = False
     
     if input_method == "Manual Text Entry":
         rag_input = st.text_area(
@@ -1010,6 +1015,537 @@ with tab1:
                 st.code(json_str, language="json")
         else:
             st.info("Add your first field above to get started!")
+    elif input_method == "Structured URL Input":
+        st.markdown("### 🌐 Structured URL Input")
+        st.markdown("Extract and structure data from web content. Choose to fetch from a URL or paste HTML content manually.")
+        
+        # Input source selection (URL or Manual Entry)
+        input_source = st.radio(
+            "Input Source:",
+            ["URL", "Manual Entry"],
+            horizontal=True,
+            key="url_input_source"
+        )
+        
+        # Store extracted data in session state
+        if 'url_extracted_content' not in st.session_state:
+            st.session_state.url_extracted_content = None
+        if 'url_structured_json' not in st.session_state:
+            st.session_state.url_structured_json = None
+        if 'url_structured_dict' not in st.session_state:
+            st.session_state.url_structured_dict = None
+        if 'url_extraction_error' not in st.session_state:
+            st.session_state.url_extraction_error = None
+        
+        # Optional JSON template (common for both)
+        json_template_input = st.text_area(
+            "JSON Template (Optional)",
+            height=200,
+            placeholder='{\n  "title": "",\n  "description": "",\n  "author": "",\n  "content": "",\n  "tags": []\n}',
+            help="Optional: Provide a JSON template to structure the extracted data. If not provided, the system will extract common structured information automatically."
+        )
+        
+        if input_source == "URL":
+            # URL input mode
+            st.markdown("**Fetch content from URL**")
+            st.markdown("The system will scrape the content using Playwright (handles JavaScript-enabled sites).")
+            
+            url_input = st.text_input(
+                "URL",
+                placeholder="https://example.com/article",
+                help="Enter the URL of the web page to extract data from",
+                key="url_input_field"
+            )
+            
+            # Extract and structure button
+            col_fetch1, col_fetch2, col_analyze = st.columns([1, 1, 3])
+            with col_fetch1:
+                fetch_button = st.button("🔍 Fetch & Structure Data", type="primary", use_container_width=True, key="fetch_url_button")
+            with col_fetch2:
+                analyze_button = st.button("🧠 Content Analysis", type="secondary", use_container_width=True, key="analyze_url_button")
+            
+            if fetch_button:
+                if not url_input or not url_input.strip():
+                    st.error("Please enter a URL")
+                else:
+                    try:
+                        with st.spinner("Fetching and structuring data from URL... This may take a moment."):
+                            from src.utils.url_data_extractor import extract_structured_data_from_url
+                            
+                            # Extract and structure data
+                            success, content, structured_json, structured_dict, error_msg = extract_structured_data_from_url(
+                                url=url_input.strip(),
+                                json_template=json_template_input.strip() if json_template_input.strip() else None,
+                                ollama_model=ollama_model,
+                                ollama_base_url=ollama_base_url,
+                                timeout=30000,  # 30 seconds timeout
+                                wait_time=2000,  # 2 seconds wait for JS to load
+                                headless=True
+                            )
+                            
+                            if success:
+                                st.session_state.url_extracted_content = content
+                                st.session_state.url_structured_json = structured_json
+                                st.session_state.url_structured_dict = structured_dict
+                                st.session_state.url_extraction_error = error_msg if error_msg else None
+                                st.success("✅ Data extracted and structured successfully!")
+                                st.rerun()
+                            else:
+                                st.session_state.url_extracted_content = None
+                                st.session_state.url_structured_json = None
+                                st.session_state.url_structured_dict = None
+                                st.session_state.url_extraction_error = error_msg
+                                st.error(f"❌ Error: {error_msg}")
+                    except ImportError as e:
+                        error_msg = str(e)
+                        if 'playwright' in error_msg.lower():
+                            st.error("Playwright is not installed. Please install it with:")
+                            st.code("pip install playwright\nplaywright install chromium")
+                        else:
+                            st.error(f"Error: {error_msg}")
+                    except Exception as e:
+                        st.error(f"❌ Error extracting data: {str(e)}")
+                        import traceback
+                        with st.expander("Technical Details"):
+                            st.code(traceback.format_exc())
+            
+            # Content Analysis button handler
+            if analyze_button:
+                if not url_input or not url_input.strip():
+                    st.error("Please enter a URL")
+                else:
+                    try:
+                        with st.spinner("Analyzing content... This may take a moment."):
+                            from src.learning_system import ContentAnalyzer
+                            
+                            # Initialize content analyzer with current RAG pipeline
+                            rag_pipeline = st.session_state.get('rag_pipeline')
+                            vectorstores = st.session_state.get('vectorstores', [])
+                            
+                            analyzer = ContentAnalyzer(
+                                rag_pipeline=rag_pipeline,
+                                vectorstores=vectorstores,
+                                retriever=st.session_state.get('retriever'),
+                                ollama_model=ollama_model,
+                                ollama_base_url=ollama_base_url
+                            )
+                            
+                            # Analyze the URL input
+                            analysis_result = analyzer.analyze(url_input.strip(), check_knowledge=True)
+                            
+                            # Store analysis result in session state
+                            st.session_state.content_analysis_result = analysis_result
+                            
+                            # Display analysis result
+                            st.markdown("---")
+                            st.markdown("### 🧠 Content Analysis Result")
+                            
+                            # Show analysis summary
+                            summary = analyzer.get_analysis_summary(analysis_result)
+                            st.markdown(summary)
+                            
+                            # Show detailed results
+                            with st.expander("📊 Detailed Analysis", expanded=True):
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    st.markdown("**Intent Detection:**")
+                                    st.json({
+                                        "intent": analysis_result.get('intent'),
+                                        "processor": analysis_result.get('processor'),
+                                        "confidence": analysis_result.get('routing_result', {}).get('confidence', 0.0)
+                                    })
+                                    
+                                    if analysis_result.get('url'):
+                                        st.markdown(f"**URL:** {analysis_result.get('url')}")
+                                    if analysis_result.get('domain'):
+                                        st.markdown(f"**Domain:** {analysis_result.get('domain')}")
+                                
+                                with col2:
+                                    st.markdown("**Knowledge Check:**")
+                                    st.json({
+                                        "has_knowledge": analysis_result.get('has_knowledge'),
+                                        "confidence": analysis_result.get('knowledge_confidence', 0.0),
+                                        "documents_found": len(analysis_result.get('knowledge_documents', [])),
+                                        "next_action": analysis_result.get('next_action')
+                                    })
+                                    
+                                    if analysis_result.get('llm_memory_check') is not None:
+                                        st.markdown(f"**LLM Memory:** {'Has memory' if analysis_result.get('llm_memory_check') else 'No memory'}")
+                            
+                            # Show knowledge context if available
+                            if analysis_result.get('has_knowledge') and analysis_result.get('knowledge_context'):
+                                with st.expander("📚 Knowledge Context (from Vector DB)", expanded=False):
+                                    context = analysis_result.get('knowledge_context', '')
+                                    preview = context[:2000] + "..." if len(context) > 2000 else context
+                                    st.text_area(
+                                        "Context",
+                                        value=preview,
+                                        height=300,
+                                        disabled=True,
+                                        key="knowledge_context_display"
+                                    )
+                                    if len(context) > 2000:
+                                        st.caption(f"Showing first 2000 characters of {len(context)} total characters")
+                                    
+                                    # Show document count
+                                    doc_count = len(analysis_result.get('knowledge_documents', []))
+                                    st.info(f"Found {doc_count} relevant document(s) in knowledge base")
+                            
+                            # Show next action recommendation
+                            next_action = analysis_result.get('next_action')
+                            if next_action == 'auto_discovery':
+                                st.warning("⚠️ **Auto-Discovery Recommended**")
+                                st.info(f"**Reason:** {analysis_result.get('auto_discovery_reason', 'No existing knowledge found')}")
+                                st.markdown("The system recommends triggering Auto-Discovery to gather information about this topic.")
+                            elif analysis_result.get('has_knowledge'):
+                                st.success("✅ **Knowledge Found**")
+                                st.info("Existing knowledge found in vector database. You can use this context for processing.")
+                            elif analysis_result.get('llm_memory_check'):
+                                st.info("ℹ️ **LLM Memory Available**")
+                                st.markdown("The LLM has some memory about this topic, but it's not stored in the vector database.")
+                            
+                    except ImportError as e:
+                        error_msg = str(e)
+                        st.error(f"Error: {error_msg}")
+                        import traceback
+                        with st.expander("Technical Details"):
+                            st.code(traceback.format_exc())
+                    except Exception as e:
+                        st.error(f"❌ Error analyzing content: {str(e)}")
+                        import traceback
+                        with st.expander("Technical Details"):
+                            st.code(traceback.format_exc())
+        
+        else:
+            # Manual Entry mode
+            st.markdown("**Paste HTML content manually**")
+            st.markdown("Paste HTML content from a web page. The system will extract text using Python libraries or LLM.")
+            
+            # HTML content input
+            html_content_input = st.text_area(
+                "HTML Content",
+                height=400,
+                placeholder="Paste HTML content here...",
+                help="Paste the HTML content from a web page. The system will extract text from it.",
+                key="html_content_input"
+            )
+            
+            # Extraction method selection
+            extraction_method = st.radio(
+                "Extraction Method:",
+                ["Python (Fast)", "LLM (Smart)"],
+                horizontal=True,
+                help="Python: Fast extraction using libraries. LLM: Intelligent extraction using local Ollama model.",
+                key="extraction_method"
+            )
+            
+            # Extract and structure button
+            col_fetch1, col_fetch2, col_analyze2 = st.columns([1, 1, 3])
+            with col_fetch1:
+                extract_button = st.button("🔍 Extract & Structure Data", type="primary", use_container_width=True, key="extract_html_button")
+            with col_fetch2:
+                analyze_html_button = st.button("🧠 Content Analysis", type="secondary", use_container_width=True, key="analyze_html_button")
+            
+            if extract_button:
+                if not html_content_input or not html_content_input.strip():
+                    st.error("Please paste HTML content")
+                else:
+                    try:
+                        with st.spinner("Extracting text from HTML and structuring data... This may take a moment."):
+                            from src.utils.html_extractor import extract_text_from_html
+                            from src.utils.url_data_extractor import URLDataExtractor
+                            
+                            # Extract text from HTML
+                            use_llm = (extraction_method == "LLM (Smart)")
+                            llm_instance = None
+                            
+                            if use_llm:
+                                # Initialize LLM for extraction
+                                from langchain_ollama import OllamaLLM
+                                llm_instance = OllamaLLM(
+                                    model=ollama_model,
+                                    base_url=ollama_base_url,
+                                    temperature=0.2
+                                )
+                            
+                            # Extract text from HTML
+                            extract_success, extracted_text, extract_error = extract_text_from_html(
+                                html_content_input.strip(),
+                                use_llm=use_llm,
+                                llm=llm_instance
+                            )
+                            
+                            if not extract_success:
+                                st.session_state.url_extracted_content = None
+                                st.session_state.url_structured_json = None
+                                st.session_state.url_structured_dict = None
+                                st.session_state.url_extraction_error = extract_error
+                                st.error(f"❌ Error extracting text: {extract_error}")
+                            else:
+                                # Structure the extracted text using Ollama
+                                # Create extractor instance (browser won't be initialized since we're only using structure_data)
+                                extractor = URLDataExtractor(
+                                    headless=True,
+                                    ollama_model=ollama_model,
+                                    ollama_base_url=ollama_base_url
+                                )
+                                
+                                try:
+                                    # Structure data (this doesn't require browser initialization)
+                                    struct_success, structured_json, structured_dict, struct_error = extractor.structure_data(
+                                        extracted_text,
+                                        json_template_input.strip() if json_template_input.strip() else None,
+                                        url=None
+                                    )
+                                    
+                                    if struct_success:
+                                        st.session_state.url_extracted_content = extracted_text
+                                        st.session_state.url_structured_json = structured_json
+                                        st.session_state.url_structured_dict = structured_dict
+                                        st.session_state.url_extraction_error = struct_error if struct_error else None
+                                        st.success("✅ Data extracted and structured successfully!")
+                                        st.rerun()
+                                    else:
+                                        # Still store extracted content even if structuring fails
+                                        st.session_state.url_extracted_content = extracted_text
+                                        st.session_state.url_structured_json = None
+                                        st.session_state.url_structured_dict = None
+                                        st.session_state.url_extraction_error = struct_error if struct_error else "Could not structure data"
+                                        st.warning(f"⚠️ Text extracted but structuring failed: {struct_error if struct_error else 'Unknown error'}")
+                                        st.info("You can still use the extracted text below.")
+                                finally:
+                                    # Clean up extractor (in case browser was initialized)
+                                    try:
+                                        extractor._close_browser()
+                                    except Exception:
+                                        pass
+                    except ImportError as e:
+                        error_msg = str(e)
+                        if 'bs4' in error_msg.lower() or 'beautifulsoup' in error_msg.lower():
+                            st.error("BeautifulSoup4 is not installed. Please install it with:")
+                            st.code("pip install beautifulsoup4")
+                        else:
+                            st.error(f"Error: {error_msg}")
+                    except Exception as e:
+                        st.error(f"❌ Error extracting data: {str(e)}")
+                        import traceback
+                        with st.expander("Technical Details"):
+                            st.code(traceback.format_exc())
+            
+            # Content Analysis button handler for Manual Entry
+            if analyze_html_button:
+                if not html_content_input or not html_content_input.strip():
+                    st.error("Please paste HTML content")
+                else:
+                    try:
+                        with st.spinner("Analyzing content... This may take a moment."):
+                            from src.learning_system import ContentAnalyzer
+                            
+                            # First extract text from HTML
+                            from src.utils.html_extractor import extract_text_from_html
+                            
+                            use_llm_for_extraction = (extraction_method == "LLM (Smart)")
+                            llm_instance = None
+                            
+                            if use_llm_for_extraction:
+                                from langchain_ollama import OllamaLLM
+                                llm_instance = OllamaLLM(
+                                    model=ollama_model,
+                                    base_url=ollama_base_url,
+                                    temperature=0.2
+                                )
+                            
+                            # Extract text from HTML
+                            extract_success, extracted_text, extract_error = extract_text_from_html(
+                                html_content_input.strip(),
+                                use_llm=use_llm_for_extraction,
+                                llm=llm_instance
+                            )
+                            
+                            if not extract_success:
+                                st.error(f"❌ Error extracting text: {extract_error}")
+                            else:
+                                # Initialize content analyzer
+                                rag_pipeline = st.session_state.get('rag_pipeline')
+                                vectorstores = st.session_state.get('vectorstores', [])
+                                
+                                analyzer = ContentAnalyzer(
+                                    rag_pipeline=rag_pipeline,
+                                    vectorstores=vectorstores,
+                                    retriever=st.session_state.get('retriever'),
+                                    ollama_model=ollama_model,
+                                    ollama_base_url=ollama_base_url
+                                )
+                                
+                                # Analyze the extracted text (use first 500 chars for analysis query)
+                                analysis_query = extracted_text[:500] if len(extracted_text) > 500 else extracted_text
+                                analysis_result = analyzer.analyze(analysis_query, check_knowledge=True)
+                                
+                                # Store analysis result in session state
+                                st.session_state.content_analysis_result = analysis_result
+                                st.session_state.analyzed_content = extracted_text
+                                
+                                # Display analysis result (same as URL mode)
+                                st.markdown("---")
+                                st.markdown("### 🧠 Content Analysis Result")
+                                
+                                # Show analysis summary
+                                summary = analyzer.get_analysis_summary(analysis_result)
+                                st.markdown(summary)
+                                
+                                # Show detailed results
+                                with st.expander("📊 Detailed Analysis", expanded=True):
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        st.markdown("**Intent Detection:**")
+                                        st.json({
+                                            "intent": analysis_result.get('intent'),
+                                            "processor": analysis_result.get('processor'),
+                                            "confidence": analysis_result.get('routing_result', {}).get('confidence', 0.0)
+                                        })
+                                    
+                                    with col2:
+                                        st.markdown("**Knowledge Check:**")
+                                        st.json({
+                                            "has_knowledge": analysis_result.get('has_knowledge'),
+                                            "confidence": analysis_result.get('knowledge_confidence', 0.0),
+                                            "documents_found": len(analysis_result.get('knowledge_documents', [])),
+                                            "next_action": analysis_result.get('next_action')
+                                        })
+                                        
+                                        if analysis_result.get('llm_memory_check') is not None:
+                                            st.markdown(f"**LLM Memory:** {'Has memory' if analysis_result.get('llm_memory_check') else 'No memory'}")
+                                
+                                # Show knowledge context if available
+                                if analysis_result.get('has_knowledge') and analysis_result.get('knowledge_context'):
+                                    with st.expander("📚 Knowledge Context (from Vector DB)", expanded=False):
+                                        context = analysis_result.get('knowledge_context', '')
+                                        preview = context[:2000] + "..." if len(context) > 2000 else context
+                                        st.text_area(
+                                            "Context",
+                                            value=preview,
+                                            height=300,
+                                            disabled=True,
+                                            key="knowledge_context_html_display"
+                                        )
+                                        if len(context) > 2000:
+                                            st.caption(f"Showing first 2000 characters of {len(context)} total characters")
+                                        
+                                        # Show document count
+                                        doc_count = len(analysis_result.get('knowledge_documents', []))
+                                        st.info(f"Found {doc_count} relevant document(s) in knowledge base")
+                                
+                                # Show next action recommendation
+                                next_action = analysis_result.get('next_action')
+                                if next_action == 'auto_discovery':
+                                    st.warning("⚠️ **Auto-Discovery Recommended**")
+                                    st.info(f"**Reason:** {analysis_result.get('auto_discovery_reason', 'No existing knowledge found')}")
+                                    st.markdown("The system recommends triggering Auto-Discovery to gather information about this topic.")
+                                elif analysis_result.get('has_knowledge'):
+                                    st.success("✅ **Knowledge Found**")
+                                    st.info("Existing knowledge found in vector database. You can use this context for processing.")
+                                elif analysis_result.get('llm_memory_check'):
+                                    st.info("ℹ️ **LLM Memory Available**")
+                                    st.markdown("The LLM has some memory about this topic, but it's not stored in the vector database.")
+                                
+                                # Show extracted text preview
+                                with st.expander("📄 Extracted Text Preview", expanded=False):
+                                    text_preview = extracted_text[:1000] + "..." if len(extracted_text) > 1000 else extracted_text
+                                    st.text_area(
+                                        "Extracted Text",
+                                        value=text_preview,
+                                        height=200,
+                                        disabled=True,
+                                        key="analyzed_extracted_text"
+                                    )
+                                    if len(extracted_text) > 1000:
+                                        st.caption(f"Showing first 1000 characters of {len(extracted_text)} total characters")
+                            
+                    except ImportError as e:
+                        error_msg = str(e)
+                        st.error(f"Error: {error_msg}")
+                        import traceback
+                        with st.expander("Technical Details"):
+                            st.code(traceback.format_exc())
+                    except Exception as e:
+                        st.error(f"❌ Error analyzing content: {str(e)}")
+                        import traceback
+                        with st.expander("Technical Details"):
+                            st.code(traceback.format_exc())
+        
+        # Display extracted content
+        if st.session_state.url_extracted_content:
+            st.markdown("---")
+            st.markdown("### 📄 Extracted Content")
+            
+            with st.expander("View Extracted Content", expanded=False):
+                content_preview = st.session_state.url_extracted_content[:5000] + "..." if len(st.session_state.url_extracted_content) > 5000 else st.session_state.url_extracted_content
+                st.text_area(
+                    "Content",
+                    value=content_preview,
+                    height=300,
+                    disabled=True,
+                    key="url_extracted_content_display"
+                )
+                if len(st.session_state.url_extracted_content) > 5000:
+                    st.caption(f"Showing first 5000 characters of {len(st.session_state.url_extracted_content)} total characters")
+            
+            # Display structured JSON
+            if st.session_state.url_structured_json:
+                st.markdown("### 📊 Structured Data Output")
+                
+                # Show structured JSON
+                st.code(st.session_state.url_structured_json, language="json")
+                
+                # Option to use structured JSON as input
+                col_use1, col_use2 = st.columns([1, 3])
+                with col_use1:
+                    if st.button("✅ Use Structured Data for Knowledge Base", key="use_structured_data", type="primary", use_container_width=True):
+                        st.session_state.url_data_used_for_kb = True
+                        st.success("✅ Structured data loaded! Click 'Create Knowledge Base' button below to proceed.")
+                        st.rerun()
+                
+                # Show warning if there was a parsing error
+                if st.session_state.url_extraction_error:
+                    st.warning(f"⚠️ Note: {st.session_state.url_extraction_error}")
+                
+                # Option to use raw extracted content instead
+                st.markdown("---")
+                st.markdown("**Alternative:** Use raw extracted content instead of structured data")
+                if st.button("✅ Use Extracted Content for Knowledge Base", key="use_extracted_content_fallback", type="secondary"):
+                    st.session_state.url_data_used_for_kb = True
+                    st.success("✅ Extracted content loaded! Click 'Create Knowledge Base' button below to proceed.")
+                    st.rerun()
+            else:
+                # No structured JSON, but we have extracted content
+                if st.session_state.url_extraction_error:
+                    st.warning(f"⚠️ Could not structure data: {st.session_state.url_extraction_error}")
+                    st.info("You can still use the extracted content below:")
+                
+                # Option to use extracted content
+                if st.button("✅ Use Extracted Content for Knowledge Base", key="use_extracted_content", type="primary"):
+                    st.session_state.url_data_used_for_kb = True
+                    st.success("✅ Extracted content loaded! Click 'Create Knowledge Base' button below to proceed.")
+                    st.rerun()
+        
+        # Track if URL data is being used for KB creation
+        if 'url_data_used_for_kb' not in st.session_state:
+            st.session_state.url_data_used_for_kb = False
+        
+        # Set rag_input based on what's available and selected
+        # If user clicked "Use Structured Data" or "Use Extracted Content", use that
+        if st.session_state.url_data_used_for_kb:
+            if st.session_state.url_structured_json:
+                rag_input = st.session_state.url_structured_json
+            elif st.session_state.url_extracted_content:
+                rag_input = st.session_state.url_extracted_content
+            else:
+                rag_input = ""
+        else:
+            # Not yet selected for use, so don't set rag_input yet
+            rag_input = ""
     else:  # PDF Upload
         uploaded_file = st.file_uploader(
             "Choose a PDF file",
