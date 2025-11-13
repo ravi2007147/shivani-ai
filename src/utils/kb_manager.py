@@ -85,6 +85,39 @@ class ProfileManager:
         self.save_profiles(profiles)
         
         return True, f"✅ Profile '{name}' created successfully"
+    
+    def delete_profile(self, profile_id: str) -> tuple[bool, str]:
+        """Delete a profile and its knowledge bases.
+        
+        Args:
+            profile_id: Profile ID to delete
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            profiles = self.load_profiles()
+            
+            # Find and remove profile
+            profile = next((p for p in profiles if p.get("id") == profile_id), None)
+            if not profile:
+                return False, f"Profile '{profile_id}' not found"
+            
+            profile_name = profile.get("name")
+            profiles = [p for p in profiles if p.get("id") != profile_id]
+            self.save_profiles(profiles)
+            
+            # Delete profile's knowledge bases directory
+            profile_dir = os.path.join(CHROMA_DB_DIR, profile_id)
+            if os.path.exists(profile_dir):
+                try:
+                    shutil.rmtree(profile_dir)
+                except Exception as e:
+                    return True, f"✅ Profile '{profile_name}' deleted, but some files could not be removed: {str(e)}"
+            
+            return True, f"✅ Profile '{profile_name}' and all its knowledge bases deleted"
+        except Exception as e:
+            return False, f"Error deleting profile: {str(e)}"
 
 
 class KnowledgeBaseManager:

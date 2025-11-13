@@ -3,7 +3,6 @@
 import streamlit as st
 import sys
 import os
-import json
 from pathlib import Path
 
 # Add project root to path
@@ -12,7 +11,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from src.config import CHROMA_DB_DIR
-from src.utils.kb_manager import KnowledgeBaseManager
+from src.utils.kb_manager import KnowledgeBaseManager, ProfileManager
 
 
 # Page configuration
@@ -26,131 +25,8 @@ st.title("👤 Profile Management")
 st.markdown("Create and manage profiles. Each profile has its own knowledge bases.")
 
 
-class ProfileManager:
-    """Manages user profiles and their knowledge bases."""
-    
-    def __init__(self):
-        """Initialize the profile manager."""
-        self.profiles_file = os.path.join(CHROMA_DB_DIR, "profiles.json")
-        self._ensure_profiles_file()
-    
-    def _ensure_profiles_file(self):
-        """Ensure the profiles file exists."""
-        os.makedirs(os.path.dirname(self.profiles_file), exist_ok=True)
-        if not os.path.exists(self.profiles_file):
-            with open(self.profiles_file, 'w') as f:
-                json.dump({"profiles": []}, f, indent=2)
-    
-    def load_profiles(self) -> list:
-        """Load all profiles from file.
-        
-        Returns:
-            List of profile dictionaries
-        """
-        try:
-            with open(self.profiles_file, 'r') as f:
-                data = json.load(f)
-                return data.get("profiles", [])
-        except Exception:
-            return []
-    
-    def save_profiles(self, profiles: list):
-        """Save profiles to file.
-        
-        Args:
-            profiles: List of profile dictionaries
-        """
-        try:
-            with open(self.profiles_file, 'w') as f:
-                json.dump({"profiles": profiles}, f, indent=2)
-        except Exception as e:
-            st.error(f"Error saving profiles: {str(e)}")
-    
-    def create_profile(self, name: str) -> tuple[bool, str]:
-        """Create a new profile.
-        
-        Args:
-            name: Profile name
-            
-        Returns:
-            Tuple of (success, message)
-        """
-        if not name or not name.strip():
-            return False, "Profile name cannot be empty"
-        
-        name = name.strip()
-        
-        profiles = self.load_profiles()
-        
-        # Check if profile already exists
-        if any(p.get("name") == name for p in profiles):
-            return False, f"Profile '{name}' already exists"
-        
-        # Create new profile ID (sanitize for directory name)
-        import re
-        profile_id = re.sub(r'[^a-z0-9_]', '_', name.lower().replace(" ", "_"))
-        # Ensure it doesn't start with a number
-        if profile_id and profile_id[0].isdigit():
-            profile_id = "profile_" + profile_id
-        
-        from datetime import datetime
-        new_profile = {
-            "id": profile_id,
-            "name": name,
-            "created_at": datetime.now().isoformat(),
-        }
-        
-        profiles.append(new_profile)
-        self.save_profiles(profiles)
-        
-        return True, f"✅ Profile '{name}' created successfully"
-    
-    def delete_profile(self, profile_id: str) -> tuple[bool, str]:
-        """Delete a profile and its knowledge bases.
-        
-        Args:
-            profile_id: Profile ID to delete
-            
-        Returns:
-            Tuple of (success, message)
-        """
-        profiles = self.load_profiles()
-        
-        # Find and remove profile
-        profile = next((p for p in profiles if p.get("id") == profile_id), None)
-        if not profile:
-            return False, f"Profile '{profile_id}' not found"
-        
-        profile_name = profile.get("name")
-        profiles = [p for p in profiles if p.get("id") != profile_id]
-        self.save_profiles(profiles)
-        
-        # Delete profile's knowledge bases directory
-        profile_dir = os.path.join(CHROMA_DB_DIR, profile_id)
-        if os.path.exists(profile_dir):
-            try:
-                import shutil
-                shutil.rmtree(profile_dir)
-            except Exception as e:
-                return True, f"✅ Profile '{profile_name}' deleted, but some files could not be removed: {str(e)}"
-        
-        return True, f"✅ Profile '{profile_name}' and all its knowledge bases deleted"
-    
-    def get_profile(self, profile_id: str) -> dict:
-        """Get a profile by ID.
-        
-        Args:
-            profile_id: Profile ID
-            
-        Returns:
-            Profile dictionary or None
-        """
-        profiles = self.load_profiles()
-        return next((p for p in profiles if p.get("id") == profile_id), None)
-
-
 # Initialize profile manager
-if 'profile_manager' not in st.session_state:
+if 'profile_manager' not in st.session_state or not hasattr(st.session_state.profile_manager, 'delete_profile'):
     st.session_state.profile_manager = ProfileManager()
 
 profile_manager = st.session_state.profile_manager
