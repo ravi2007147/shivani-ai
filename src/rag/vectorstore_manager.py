@@ -161,6 +161,8 @@ class VectorStoreManager:
         text: str,
         embedding_model: str,
         base_url: str,
+        source_urls: List[str] = None,
+        topic: str = None,
     ) -> tuple[Chroma, str]:
         """Create a new vectorstore from text and persist it.
         Optimized for large knowledge bases with batch processing.
@@ -169,12 +171,23 @@ class VectorStoreManager:
             text: Text to create embeddings from
             embedding_model: Name of the embedding model to use
             base_url: Base URL for Ollama API
+            source_urls: Optional list of source URLs for metadata
+            topic: Optional topic name for metadata
             
         Returns:
             Tuple of (vectorstore, persist_directory_path)
         """
-        # Create documents
-        documents = [Document(page_content=text)]
+        # Prepare metadata
+        metadata = {}
+        if topic:
+            metadata['topic'] = topic
+        if source_urls:
+            # Store URLs as comma-separated string in metadata
+            metadata['source_urls'] = ','.join(source_urls)
+            metadata['source_url_count'] = str(len(source_urls))
+        
+        # Create documents with metadata
+        documents = [Document(page_content=text, metadata=metadata)]
         
         # Dynamically optimize chunk size for large texts
         text_length = len(text)
@@ -197,6 +210,16 @@ class VectorStoreManager:
             separators=["\n\n", "\n", ". ", " ", ""],  # Preserve paragraph boundaries
         )
         texts = text_splitter.split_documents(documents)
+        
+        # Ensure metadata is preserved in all chunks
+        # RecursiveCharacterTextSplitter should preserve metadata automatically,
+        # but we'll ensure it's present for all chunks
+        if metadata:
+            for doc in texts:
+                # Merge metadata (don't overwrite existing metadata)
+                for key, value in metadata.items():
+                    if key not in doc.metadata:
+                        doc.metadata[key] = value
         
         # Create embeddings
         embeddings = OllamaEmbeddings(

@@ -7,6 +7,7 @@ import sys
 import time
 import json
 from pathlib import Path
+from typing import Dict, Optional
 
 from langchain_ollama import OllamaLLM
 from streamlit.components.v1 import html
@@ -588,6 +589,201 @@ def initialize_llm_for_direct_query(ollama_model: str, ollama_base_url: str) -> 
         return True
     except Exception as e:
         return False
+
+
+def _run_auto_discovery(
+    topic: str,
+    input_source: str,
+    input_text: Optional[str],
+    analysis_result: Dict,
+    analyzer,
+    json_template_input: str,
+    embedding_model: str,
+    is_from_url: bool = False
+):
+    """Run auto-discovery process.
+    
+    This function is called separately from the button handler to avoid
+    state management issues with Streamlit.
+    
+    Args:
+        topic: Topic to discover
+        input_source: Source type ("url" or "manual")
+        input_text: Input text for topic extraction
+        analysis_result: Analysis result dictionary
+        analyzer: ContentAnalyzer instance
+        json_template_input: JSON template input
+        embedding_model: Embedding model name
+        is_from_url: Whether the topic is from a URL (affects search query format)
+    """
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    try:
+        logger.info("=" * 80)
+        logger.info("🚀 AUTO-DISCOVERY STARTED")
+        logger.info("=" * 80)
+        logger.info(f"📌 Topic: {topic}")
+        logger.info(f"📌 Input Source: {input_source}")
+        
+        # Show status message and progress
+        status_placeholder = st.empty()
+        progress_bar = st.progress(0, text="Starting auto-discovery...")
+        
+        with status_placeholder.container():
+            st.info(f"🔍 **Discovering knowledge about {topic}...** This may take a few minutes.")
+        
+        # Get topic from analysis result
+        logger.info("🔍 Step 1: Extracting topic from input...")
+        if input_text:
+            extracted_topic = analyzer.extract_topic_from_input(
+                input_text,
+                analysis_result.get('intent'),
+                analysis_result.get('metadata', {})
+            )
+            logger.info(f"✅ Extracted topic: {extracted_topic}")
+        else:
+            extracted_topic = topic
+            logger.info(f"✅ Using default topic: {extracted_topic}")
+        
+        if not extracted_topic:
+            extracted_topic = topic
+            logger.info(f"✅ Fallback to topic: {extracted_topic}")
+        
+        # Initialize vectorstore manager
+        logger.info("🔍 Step 2: Initializing vectorstore manager...")
+        from src.rag import VectorStoreManager
+        profile_id = st.session_state.selected_profiles[0] if st.session_state.selected_profiles else "default"
+        logger.info(f"✅ Profile ID: {profile_id}")
+        vectorstore_manager = VectorStoreManager(profile_id=profile_id)
+        logger.info("✅ VectorStoreManager initialized")
+        
+        # Trigger auto-discovery
+        logger.info("🔍 Step 3: Triggering auto-discovery...")
+        logger.info(f"   - Topic: {extracted_topic}")
+        logger.info(f"   - Max search results: 10")
+        logger.info(f"   - Max URLs to extract: 3")
+        logger.info(f"   - Embedding model: {embedding_model}")
+        logger.info(f"   - Knowledge template: {'Provided' if json_template_input.strip() else 'None'}")
+        
+        # Update progress
+        progress_bar.progress(20, text="Searching the web...")
+        
+        discovery_result = analyzer.trigger_auto_discovery(
+            topic=extracted_topic,
+            knowledge_template=json_template_input.strip() if json_template_input.strip() else None,
+            vectorstore_manager=vectorstore_manager,
+            embedding_model=embedding_model,
+            profile_id=profile_id,
+            max_search_results=10,
+            max_urls_to_extract=3,
+            is_from_url=is_from_url  # Pass is_from_url flag
+        )
+        
+        # Update progress
+        progress_bar.progress(80, text="Processing results...")
+        
+        # Clear status
+        status_placeholder.empty()
+        progress_bar.empty()
+        
+        logger.info("🔍 Step 4: Processing auto-discovery results...")
+        if discovery_result.get('success'):
+            logger.info("✅ Auto-discovery completed successfully!")
+            logger.info(f"   - Knowledge length: {len(discovery_result.get('knowledge', ''))} characters")
+            logger.info(f"   - KB ID: {discovery_result.get('kb_id', 'N/A')}")
+            logger.info(f"   - Persist directory: {discovery_result.get('persist_dir', 'N/A')}")
+            
+            search_results = discovery_result.get('search_results', {})
+            if search_results:
+                logger.info(f"   - Search results found: {search_results.get('total_results', 0)}")
+                logger.info(f"   - URLs extracted: {len(discovery_result.get('extracted_content', []))}")
+            
+            source_urls = discovery_result.get('source_urls', [])
+            if source_urls:
+                logger.info(f"   - Source URLs: {len(source_urls)} URLs stored")
+                for i, url in enumerate(source_urls, 1):
+                    logger.info(f"      {i}. {url}")
+            
+            # Show success message
+            st.success(f"✅ Successfully discovered and stored knowledge about {extracted_topic}!")
+            
+            # Show discovered knowledge
+            with st.expander("📚 Discovered Knowledge", expanded=True):
+                knowledge = discovery_result.get('knowledge', '')
+                st.markdown(knowledge)
+            
+            # Show source URLs if available
+            if source_urls:
+                with st.expander("🔗 Source URLs", expanded=False):
+                    st.info("**Source URLs stored in knowledge base:**")
+                    for i, url in enumerate(source_urls, 1):
+                        st.markdown(f"{i}. [{url}]({url})")
+                    st.caption("💡 **Note:** These URLs are stored in the knowledge base and can be used by the LLM to collect additional information if needed.")
+            
+            # Show search results summary
+            if search_results:
+                st.info(f"Found {search_results.get('total_results', 0)} search results and extracted content from {len(discovery_result.get('extracted_content', []))} URLs")
+            
+            # Update RAG pipeline if vectorstore was created
+            logger.info("🔍 Step 5: Updating RAG pipeline...")
+            if discovery_result.get('vectorstore'):
+                # Add to RAG pipeline
+                if st.session_state.rag_pipeline:
+                    st.session_state.rag_pipeline.add_vectorstore(discovery_result['vectorstore'])
+                    logger.info("✅ Added vectorstore to existing RAG pipeline")
+                if st.session_state.vectorstores:
+                    st.session_state.vectorstores.append(discovery_result['vectorstore'])
+                    logger.info("✅ Added vectorstore to vectorstores list")
+                
+                st.success("✅ Discovered knowledge added to active knowledge bases!")
+                st.info("You can now query this knowledge base using the Query tab.")
+            
+            logger.info("=" * 80)
+            logger.info("✅ AUTO-DISCOVERY COMPLETED SUCCESSFULLY")
+            logger.info("=" * 80)
+            
+            # Store result in session state for display
+            st.session_state.auto_discovery_result = discovery_result
+            st.session_state.auto_discovery_completed = True
+            
+        else:
+            error_msg = discovery_result.get('error', 'Unknown error')
+            logger.error("❌ Auto-discovery failed!")
+            logger.error(f"   Error: {error_msg}")
+            logger.info("=" * 80)
+            
+            # Clear status and show error
+            status_placeholder.empty()
+            progress_bar.empty()
+            st.error(f"❌ Auto-discovery failed: {error_msg}")
+            
+            # Store error in session state
+            st.session_state.auto_discovery_error = error_msg
+            st.session_state.auto_discovery_completed = False
+            
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        logger.error("❌ ERROR DURING AUTO-DISCOVERY")
+        logger.error(f"   Error: {str(e)}")
+        logger.error("   Traceback:")
+        logger.error(error_trace)
+        logger.info("=" * 80)
+        
+        # Clear status and show error
+        if 'status_placeholder' in locals():
+            status_placeholder.empty()
+        if 'progress_bar' in locals():
+            progress_bar.empty()
+        st.error(f"❌ Error during auto-discovery: {str(e)}")
+        with st.expander("Technical Details"):
+            st.code(error_trace)
+        
+        # Store error in session state
+        st.session_state.auto_discovery_error = str(e)
+        st.session_state.auto_discovery_completed = False
 
 
 # Initialize session state
@@ -1192,12 +1388,58 @@ with tab1:
                                     doc_count = len(analysis_result.get('knowledge_documents', []))
                                     st.info(f"Found {doc_count} relevant document(s) in knowledge base")
                             
-                            # Show next action recommendation
+                            # Check if auto-discovery should be triggered automatically
                             next_action = analysis_result.get('next_action')
-                            if next_action == 'auto_discovery':
+                            auto_discovery_trigger = analysis_result.get('auto_discovery_trigger', False)
+                            has_knowledge = analysis_result.get('has_knowledge', False)
+                            llm_memory_check = analysis_result.get('llm_memory_check')
+                            
+                            # Determine if auto-discovery should be triggered
+                            should_trigger_auto_discovery = (
+                                next_action == 'auto_discovery' or 
+                                auto_discovery_trigger or
+                                (not has_knowledge and (llm_memory_check is False or llm_memory_check is None))
+                            )
+                            
+                            if should_trigger_auto_discovery:
+                                # Automatically trigger auto-discovery
+                                st.markdown("---")
                                 st.warning("⚠️ **Auto-Discovery Recommended**")
-                                st.info(f"**Reason:** {analysis_result.get('auto_discovery_reason', 'No existing knowledge found')}")
-                                st.markdown("The system recommends triggering Auto-Discovery to gather information about this topic.")
+                                st.info(f"**Reason:** {analysis_result.get('auto_discovery_reason', 'No existing knowledge found in vector DB or LLM memory')}")
+                                st.markdown("🚀 **Automatically starting Auto-Discovery...**")
+                                
+                                # Extract topic from analysis result
+                                topic = None
+                                if analysis_result.get('domain'):
+                                    domain_parts = analysis_result.get('domain').split('.')
+                                    if len(domain_parts) >= 2:
+                                        topic = domain_parts[-2].capitalize() if domain_parts[-2] != 'www' else domain_parts[-3].capitalize() if len(domain_parts) >= 3 else domain_parts[-1].capitalize()
+                                elif analysis_result.get('url'):
+                                    from urllib.parse import urlparse
+                                    parsed = urlparse(analysis_result.get('url'))
+                                    domain = parsed.netloc.replace('www.', '')
+                                    domain_parts = domain.split('.')
+                                    if len(domain_parts) >= 2:
+                                        topic = domain_parts[-2].capitalize()
+                                
+                                if not topic:
+                                    topic = analyzer.extract_topic_from_input(
+                                        url_input.strip() if url_input else "",
+                                        analysis_result.get('intent'),
+                                        analysis_result.get('metadata', {})
+                                    ) or "the topic"
+                                
+                                # Run auto-discovery immediately (is_from_url=True for URL mode)
+                                _run_auto_discovery(
+                                    topic=topic,
+                                    input_source="url",
+                                    input_text=url_input.strip() if url_input else "",
+                                    analysis_result=analysis_result,
+                                    analyzer=analyzer,
+                                    json_template_input=json_template_input,
+                                    embedding_model=embedding_model,
+                                    is_from_url=True  # Mark as from URL for better search queries
+                                )
                             elif analysis_result.get('has_knowledge'):
                                 st.success("✅ **Knowledge Found**")
                                 st.info("Existing knowledge found in vector database. You can use this context for processing.")
@@ -1437,12 +1679,44 @@ with tab1:
                                         doc_count = len(analysis_result.get('knowledge_documents', []))
                                         st.info(f"Found {doc_count} relevant document(s) in knowledge base")
                                 
-                                # Show next action recommendation
+                                # Check if auto-discovery should be triggered automatically
                                 next_action = analysis_result.get('next_action')
-                                if next_action == 'auto_discovery':
+                                auto_discovery_trigger = analysis_result.get('auto_discovery_trigger', False)
+                                has_knowledge = analysis_result.get('has_knowledge', False)
+                                llm_memory_check = analysis_result.get('llm_memory_check')
+                                
+                                # Determine if auto-discovery should be triggered
+                                should_trigger_auto_discovery = (
+                                    next_action == 'auto_discovery' or 
+                                    auto_discovery_trigger or
+                                    (not has_knowledge and (llm_memory_check is False or llm_memory_check is None))
+                                )
+                                
+                                if should_trigger_auto_discovery:
+                                    # Automatically trigger auto-discovery
+                                    st.markdown("---")
                                     st.warning("⚠️ **Auto-Discovery Recommended**")
-                                    st.info(f"**Reason:** {analysis_result.get('auto_discovery_reason', 'No existing knowledge found')}")
-                                    st.markdown("The system recommends triggering Auto-Discovery to gather information about this topic.")
+                                    st.info(f"**Reason:** {analysis_result.get('auto_discovery_reason', 'No existing knowledge found in vector DB or LLM memory')}")
+                                    st.markdown("🚀 **Automatically starting Auto-Discovery...**")
+                                    
+                                    # Extract topic from analysis result
+                                    topic = analyzer.extract_topic_from_input(
+                                        extracted_text[:100] if extracted_text else "",
+                                        analysis_result.get('intent'),
+                                        analysis_result.get('metadata', {})
+                                    ) or "the content topic"
+                                    
+                                    # Run auto-discovery immediately (is_from_url=False for manual entry)
+                                    _run_auto_discovery(
+                                        topic=topic,
+                                        input_source="manual",
+                                        input_text=extracted_text[:100] if extracted_text else "",
+                                        analysis_result=analysis_result,
+                                        analyzer=analyzer,
+                                        json_template_input=json_template_input,
+                                        embedding_model=embedding_model,
+                                        is_from_url=False  # Manual entry is not from URL
+                                    )
                                 elif analysis_result.get('has_knowledge'):
                                     st.success("✅ **Knowledge Found**")
                                     st.info("Existing knowledge found in vector database. You can use this context for processing.")
