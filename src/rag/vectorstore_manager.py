@@ -6,7 +6,7 @@ import hashlib
 import time
 import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Optional
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -163,6 +163,8 @@ class VectorStoreManager:
         base_url: str,
         source_urls: List[str] = None,
         topic: str = None,
+        structured_relations: Dict = None,
+        relation_metadata: Dict = None,
     ) -> tuple[Chroma, str]:
         """Create a new vectorstore from text and persist it.
         Optimized for large knowledge bases with batch processing.
@@ -173,6 +175,8 @@ class VectorStoreManager:
             base_url: Base URL for Ollama API
             source_urls: Optional list of source URLs for metadata
             topic: Optional topic name for metadata
+            structured_relations: Optional structured relations JSON/dict for metadata
+            relation_metadata: Optional additional relation metadata (confidence, etc.)
             
         Returns:
             Tuple of (vectorstore, persist_directory_path)
@@ -185,6 +189,27 @@ class VectorStoreManager:
             # Store URLs as comma-separated string in metadata
             metadata['source_urls'] = ','.join(source_urls)
             metadata['source_url_count'] = str(len(source_urls))
+        
+        # Add structured relations metadata if provided
+        if structured_relations:
+            import json
+            # Store structured relations as JSON string in metadata
+            if isinstance(structured_relations, dict):
+                metadata['structured_relations'] = json.dumps(structured_relations)
+            else:
+                metadata['structured_relations'] = str(structured_relations)
+            metadata['has_structured_relations'] = 'true'
+        
+        # Add relation metadata if provided
+        if relation_metadata:
+            if isinstance(relation_metadata, dict):
+                for key, value in relation_metadata.items():
+                    # Convert non-string values to strings for metadata
+                    if isinstance(value, (dict, list)):
+                        import json
+                        metadata[f'relation_{key}'] = json.dumps(value)
+                    else:
+                        metadata[f'relation_{key}'] = str(value)
         
         # Create documents with metadata
         documents = [Document(page_content=text, metadata=metadata)]

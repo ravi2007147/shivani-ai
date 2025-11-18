@@ -6,8 +6,11 @@ import shutil
 import sys
 import time
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from langchain_ollama import OllamaLLM
 from streamlit.components.v1 import html
@@ -297,6 +300,8 @@ def create_knowledge_base_with_progress(
     progress_callback=None,
     title: str = None,
     pdf_metadata: dict = None,
+    use_relation_extractor: bool = False,
+    topic: str = None,
 ) -> tuple[bool, str, list]:
     """Create a new knowledge base from text with progress updates.
     
@@ -334,6 +339,82 @@ def create_knowledge_base_with_progress(
         # Initialize vectorstore manager with profile
         manager = VectorStoreManager(profile_id=profile_id)
         
+        # Step: Relation Extraction (if enabled)
+        processed_text = rag_input
+        structured_relations = None
+        relation_metadata = None
+        
+        if use_relation_extractor:
+            if progress_callback:
+                progress_callback("Step 2.5/5", "🔍 Running Relation Extractor LLM...")
+                progress_callback("Step 2.5/5", "Retrieving related facts from existing knowledge...")
+            
+            try:
+                from src.relation_extractor import RelationExtractor
+                from src.utils.kb_manager import KnowledgeBaseManager
+                
+                # Initialize Relation Extractor
+                relation_extractor = RelationExtractor(
+                    ollama_model=ollama_model,
+                    ollama_base_url=ollama_base_url,
+                    embedding_model=embedding_model
+                )
+                
+                # Load existing vectorstore for this profile to retrieve related facts
+                existing_vectorstore = None
+                kb_manager = KnowledgeBaseManager(profile_id=profile_id)
+                kb_list = kb_manager.list_knowledge_bases()
+                
+                if kb_list and len(kb_list) > 0:
+                    # Try to load the most recent KB or first KB
+                    kb = kb_list[-1]  # Most recent
+                    persist_dir_existing = kb.get("persist_dir")
+                    
+                    if persist_dir_existing and os.path.exists(persist_dir_existing):
+                        try:
+                            existing_vectorstore = manager.load_vectorstore(
+                                persist_dir_existing,
+                                embedding_model,
+                                ollama_base_url
+                            )
+                            if progress_callback:
+                                progress_callback("Step 2.5/5", f"✅ Loaded existing knowledge base for relation extraction")
+                        except Exception as e:
+                            logger.warning(f"Could not load existing vectorstore: {str(e)}")
+                
+                # Process content through Relation Extractor
+                if progress_callback:
+                    progress_callback("Step 2.5/5", "Analyzing relations with LLM...")
+                
+                result = relation_extractor.process_content(
+                    content=rag_input,
+                    vectorstore=existing_vectorstore,
+                    topic=topic,
+                    k_facts=5
+                )
+                
+                if result and result.get('is_related', False):
+                    # Content is related - use cleaned text and structured relations
+                    processed_text = result.get('cleaned_text', rag_input)
+                    structured_relations = result.get('structured_relations', {})
+                    relation_metadata = result.get('metadata', {})
+                    
+                    if progress_callback:
+                        confidence = result.get('confidence', 0.0)
+                        progress_callback("Step 2.5/5", f"✅ Content verified as related (confidence: {confidence:.2f})")
+                        progress_callback("Step 2.5/5", f"Extracted {len(structured_relations.get('entities', []))} entities and {len(structured_relations.get('relationships', []))} relationships")
+                else:
+                    # Content is not related - discard
+                    if progress_callback:
+                        progress_callback("Step 2.5/5", "❌ Content not related to existing knowledge - discarding")
+                    return False, "Content not related to existing knowledge. Discarded.", []
+                
+            except Exception as e:
+                logger.error(f"Error in relation extraction: {str(e)}")
+                if progress_callback:
+                    progress_callback("Step 2.5/5", f"⚠️ Relation extraction failed, proceeding without it: {str(e)}")
+                # Continue without relation extraction on error
+        
         if progress_callback:
             progress_callback("Step 3/5", f"Creating embeddings using model: {embedding_model}")
             progress_callback("Step 3/5", "Connecting to Ollama embedding service...")
@@ -343,9 +424,12 @@ def create_knowledge_base_with_progress(
         # This is the critical step that calls Ollama API to generate embeddings
         try:
             vectorstore, persist_dir = manager.create_vectorstore(
-                rag_input,
+                processed_text,  # Use processed text (cleaned if relation extractor was used)
                 embedding_model,
                 ollama_base_url,
+                structured_relations=structured_relations,  # Pass structured relations as metadata
+                relation_metadata=relation_metadata,  # Pass relation metadata
+                topic=topic,  # Pass topic if available
             )
             if progress_callback:
                 progress_callback("Step 3/5", "✅ Embeddings created successfully!")
@@ -366,7 +450,7 @@ def create_knowledge_base_with_progress(
         # Count chunks (accurate count from actual splitting)
         from src.utils.performance_utils import get_chunk_count_estimate, optimize_chunk_size
         
-        text_length = len(rag_input)
+        text_length = len(processed_text)  # Use processed_text (cleaned if relation extractor was used)
         optimal_chunk_size, optimal_overlap = optimize_chunk_size(text_length)
         
         # Use optimized sizes for large texts
@@ -386,7 +470,7 @@ def create_knowledge_base_with_progress(
         kb_manager.register_knowledge_base(
             kb_id=kb_id,
             persist_dir=persist_dir,
-            text_preview=rag_input,
+            text_preview=processed_text,  # Use processed_text (cleaned if relation extractor was used)
             chunk_count=approx_chunks,
             title=title,
             pdf_metadata=pdf_metadata,
@@ -1289,6 +1373,7 @@ with tab1:
                                 st.session_state.url_extracted_content = content
                                 st.session_state.url_structured_json = structured_json
                                 st.session_state.url_structured_dict = structured_dict
+                                st.session_state.url_extracted_url = url_input.strip()  # Store URL for topic extraction
                                 st.session_state.url_extraction_error = error_msg if error_msg else None
                                 st.success("✅ Data extracted and structured successfully!")
                                 st.rerun()
@@ -1334,6 +1419,7 @@ with tab1:
                             
                             # Analyze the URL input
                             analysis_result = analyzer.analyze(url_input.strip(), check_knowledge=True)
+                            print("analysis_result",url_input.strip())
                             
                             # Store analysis result in session state
                             st.session_state.content_analysis_result = analysis_result
@@ -1906,6 +1992,72 @@ with tab1:
                 profile_name = next((p.get('name') for p in all_profiles_list if p.get('id') == profile_id), profile_id)
                 status_text.info(f"📝 Creating knowledge base for profile: **{profile_name}**")
                 
+                # Determine if we should use Relation Extractor (for Structured URL Input)
+                use_relation_extractor = (input_method == "Structured URL Input")
+                topic = None
+                
+                # Extract topic from URL if available (for Structured URL Input)
+                if use_relation_extractor:
+                    # Try multiple sources for the URL
+                    url = None
+                    
+                    # First, try to get URL from session state (stored after extraction)
+                    if 'url_extracted_url' in st.session_state and st.session_state.url_extracted_url:
+                        url = st.session_state.url_extracted_url
+                        logger.info(f"Using URL from session state: {url}")
+                    # Second, try to get from the URL input field directly (widget value)
+                    elif 'url_input_field' in st.session_state:
+                        widget_value = st.session_state.url_input_field
+                        if widget_value and widget_value.strip():
+                            url = widget_value.strip()
+                            logger.info(f"Using URL from input field: {url}")
+                    
+                    # Extract topic from URL if we found one
+                    if url:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        netloc = parsed.netloc.lower().replace('www.', '')
+                        
+                        # Better domain extraction (handles subdomains)
+                        # Extract main domain (e.g., "example" from "subdomain.example.com" or "example.co.uk")
+                        domain_parts = netloc.split('.')
+                        if len(domain_parts) >= 2:
+                            # Get the main domain (usually second-to-last part, but handle TLDs like .co.uk)
+                            # Common two-part TLDs: co.uk, com.au, etc.
+                            if len(domain_parts) >= 3 and domain_parts[-2] in ['co', 'com', 'net', 'org', 'gov', 'edu']:
+                                # Likely a two-part TLD, use third-to-last
+                                topic = domain_parts[-3] if len(domain_parts) >= 3 else domain_parts[-2]
+                            else:
+                                # Standard TLD, use second-to-last
+                                topic = domain_parts[-2]
+                        else:
+                            # Fallback: use first part
+                            topic = domain_parts[0] if domain_parts else None
+                        
+                        # Capitalize first letter
+                        if topic:
+                            topic = topic.capitalize()
+                        
+                        logger.info(f"Extracted topic from URL: {topic}")
+                    
+                    # If no URL found, try to extract topic from content itself (first few words)
+                    if not topic and rag_input:
+                        # Extract first few meaningful words as topic hint
+                        words = rag_input.strip().split()[:5]
+                        if words:
+                            # Join first few words as a potential topic
+                            topic = ' '.join(words).strip()
+                            # Limit topic length
+                            if len(topic) > 50:
+                                topic = topic[:50]
+                        logger.info(f"Extracted topic from content: {topic}")
+                    
+                    # Log final topic
+                    if topic:
+                        logger.info(f"✅ Using topic for relation extraction: {topic}")
+                    else:
+                        logger.warning("⚠️ No topic extracted, relation extraction may be less accurate")
+                
                 # Create knowledge base with progress updates
                 success, message, progress_updates = create_knowledge_base_with_progress(
                     rag_input,
@@ -1915,7 +2067,9 @@ with tab1:
                     profile_id=profile_id,
                     progress_callback=lambda step, msg: status_text.info(f"📝 {step}: {msg}"),
                     title=kb_title if kb_title else None,
-                    pdf_metadata=kb_pdf_metadata
+                    pdf_metadata=kb_pdf_metadata,
+                    use_relation_extractor=use_relation_extractor,
+                    topic=topic
                 )
                 
                 # Clear status

@@ -33,7 +33,9 @@ class KnowledgeChecker:
         self.retriever = retriever
         
         # Minimum similarity score to consider knowledge as "existing"
-        self.min_similarity_threshold = 0.3
+        # This should be relatively high to avoid false positives
+        # 0.5 means documents need to be at least 50% similar
+        self.min_similarity_threshold = 0.5
         
         # Minimum number of documents to consider knowledge as "sufficient"
         self.min_documents_threshold = 1
@@ -66,9 +68,9 @@ class KnowledgeChecker:
         query = query.strip()
         logger.info(f"Checking knowledge for query: {query}")
         
-        # Try to retrieve documents
+        # Try to retrieve documents with similarity scores
         try:
-            documents = self._retrieve_documents(query, k)
+            documents, similarity_scores = self._retrieve_documents(query, k)
             
             if not documents or len(documents) == 0:
                 logger.info(f"No documents found for query: {query}")
@@ -81,8 +83,9 @@ class KnowledgeChecker:
                     'message': 'No documents found in vector database'
                 }
             
-            # Extract similarity scores if available
-            similarity_scores = self._extract_similarity_scores(documents)
+            # Extract similarity scores from metadata if not already retrieved
+            if not similarity_scores or all(s is None for s in similarity_scores):
+                similarity_scores = self._extract_similarity_scores(documents)
             
             # Check if we have sufficient knowledge
             has_knowledge = self._has_sufficient_knowledge(documents, similarity_scores)
@@ -115,61 +118,112 @@ class KnowledgeChecker:
                 'message': f'Error checking knowledge: {str(e)}'
             }
     
-    def _retrieve_documents(self, query: str, k: int) -> List[Document]:
-        """Retrieve documents from vector database.
+    def _retrieve_documents(self, query: str, k: int) -> Tuple[List[Document], List[float]]:
+        """Retrieve documents from vector database with similarity scores.
         
         Args:
             query: Query string
             k: Number of documents to retrieve
             
         Returns:
-            List of Document objects
+            Tuple of (List of Document objects, List of similarity scores)
         """
         documents = []
+        similarity_scores = []
         
-        # Try using RAG pipeline first
-        if self.rag_pipeline:
+        # Try using vectorstores directly with similarity_search_with_score to get actual scores
+        if self.vectorstores:
+            try:
+                for vectorstore in self.vectorstores:
+                    try:
+                        # Use similarity_search_with_score to get actual similarity scores
+                        # Chroma returns (distance, document) tuples where lower distance = more similar
+                        docs_with_scores = vectorstore.similarity_search_with_score(query, k=k)
+                        
+                        for doc, distance in docs_with_scores:
+                            # Convert distance to similarity score (Chroma uses distance, not similarity)
+                            # Distance 0 = perfect match, higher distance = less similar
+                            # Convert to similarity: similarity = 1 / (1 + distance)
+                            # Or use: similarity = max(0, 1 - distance) for cosine distance
+                            # For now, use: similarity = 1 / (1 + distance) which works for most distance metrics
+                            similarity = 1.0 / (1.0 + float(distance))
+                            
+                            # Store score in document metadata for later extraction
+                            if not hasattr(doc, 'metadata') or not doc.metadata:
+                                doc.metadata = {}
+                            doc.metadata['similarity_score'] = similarity
+                            doc.metadata['distance'] = distance
+                            
+                            documents.append(doc)
+                            similarity_scores.append(similarity)
+                            
+                        # Break after first successful vectorstore
+                        if documents:
+                            break
+                    except Exception as e:
+                        logger.warning(f"Error retrieving from vectorstore with scores: {str(e)}")
+                        # Fallback: try without scores
+                        try:
+                            docs = vectorstore.similarity_search(query, k=k)
+                            if docs:
+                                # No scores available, will be handled later
+                                for doc in docs:
+                                    if not hasattr(doc, 'metadata') or not doc.metadata:
+                                        doc.metadata = {}
+                                    doc.metadata['similarity_score'] = None
+                                documents.extend(docs)
+                                break
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.warning(f"Error retrieving from vectorstores: {str(e)}")
+        
+        # Try using RAG pipeline if no documents found yet
+        if not documents and self.rag_pipeline:
             try:
                 docs = self.rag_pipeline.retrieve_documents(query, k=k)
                 if docs:
+                    # RAG pipeline might not provide scores
+                    for doc in docs:
+                        if not hasattr(doc, 'metadata') or not doc.metadata:
+                            doc.metadata = {}
+                        if 'similarity_score' not in doc.metadata:
+                            doc.metadata['similarity_score'] = None
                     documents.extend(docs)
             except Exception as e:
                 logger.warning(f"Error retrieving from RAG pipeline: {str(e)}")
         
-        # Try using retriever directly
+        # Try using retriever directly as last resort
         if not documents and self.retriever:
             try:
                 docs = self.retriever.invoke(query)
                 if docs:
+                    for doc in docs:
+                        if not hasattr(doc, 'metadata') or not doc.metadata:
+                            doc.metadata = {}
+                        if 'similarity_score' not in doc.metadata:
+                            doc.metadata['similarity_score'] = None
                     documents.extend(docs)
             except Exception as e:
                 logger.warning(f"Error retrieving from retriever: {str(e)}")
         
-        # Try using vectorstores directly
-        if not documents and self.vectorstores:
-            try:
-                for vectorstore in self.vectorstores:
-                    try:
-                        retriever = vectorstore.as_retriever(search_kwargs={"k": k})
-                        docs = retriever.invoke(query)
-                        if docs:
-                            documents.extend(docs)
-                    except Exception as e:
-                        logger.warning(f"Error retrieving from vectorstore: {str(e)}")
-                        continue
-            except Exception as e:
-                logger.warning(f"Error retrieving from vectorstores: {str(e)}")
-        
         # Remove duplicates based on content
         unique_documents = []
+        unique_scores = []
         seen_content = set()
-        for doc in documents:
+        for i, doc in enumerate(documents):
             content_hash = hash(doc.page_content[:100])  # Hash first 100 chars
             if content_hash not in seen_content:
                 unique_documents.append(doc)
+                if i < len(similarity_scores):
+                    unique_scores.append(similarity_scores[i])
+                elif 'similarity_score' in doc.metadata and doc.metadata['similarity_score'] is not None:
+                    unique_scores.append(doc.metadata['similarity_score'])
+                else:
+                    unique_scores.append(None)
                 seen_content.add(content_hash)
         
-        return unique_documents[:k]
+        return unique_documents[:k], unique_scores[:k]
     
     def _extract_similarity_scores(self, documents: List[Document]) -> List[float]:
         """Extract similarity scores from documents.
@@ -178,7 +232,7 @@ class KnowledgeChecker:
             documents: List of Document objects
             
         Returns:
-            List of similarity scores
+            List of similarity scores (None if score not available)
         """
         scores = []
         for doc in documents:
@@ -188,9 +242,11 @@ class KnowledgeChecker:
                 if score is not None:
                     scores.append(float(score))
                 else:
-                    scores.append(1.0)  # Default score if not available
+                    # No score available - return None to indicate we can't verify similarity
+                    scores.append(None)
             else:
-                scores.append(1.0)  # Default score if no metadata
+                # No metadata - return None to indicate we can't verify similarity
+                scores.append(None)
         return scores
     
     def _has_sufficient_knowledge(self, documents: List[Document], similarity_scores: List[float]) -> bool:
@@ -198,27 +254,39 @@ class KnowledgeChecker:
         
         Args:
             documents: List of Document objects
-            similarity_scores: List of similarity scores
+            similarity_scores: List of similarity scores (can contain None values)
             
         Returns:
             True if sufficient knowledge exists, False otherwise
         """
         # Check minimum document count
         if len(documents) < self.min_documents_threshold:
+            logger.info(f"Insufficient documents: {len(documents)} < {self.min_documents_threshold}")
             return False
         
-        # Check similarity scores
-        if similarity_scores:
-            # Check if any score is above threshold
-            max_score = max(similarity_scores) if similarity_scores else 0.0
+        # Check similarity scores - CRITICAL: only consider actual scores, not None
+        valid_scores = [s for s in similarity_scores if s is not None]
+        
+        if valid_scores:
+            # We have actual similarity scores - check if any is above threshold
+            max_score = max(valid_scores)
+            logger.info(f"Max similarity score: {max_score:.3f}, threshold: {self.min_similarity_threshold}")
             if max_score < self.min_similarity_threshold:
+                logger.info(f"Similarity score {max_score:.3f} below threshold {self.min_similarity_threshold}")
                 return False
+        else:
+            # No valid scores available - cannot verify similarity
+            # This is a safety check: if we can't verify similarity, don't assume knowledge exists
+            logger.warning(f"No valid similarity scores available - cannot verify knowledge relevance")
+            return False
         
         # Check document content quality
         total_content_length = sum(len(doc.page_content) for doc in documents)
         if total_content_length < 100:  # Minimum content length
+            logger.info(f"Content too short: {total_content_length} < 100")
             return False
         
+        logger.info(f"Sufficient knowledge found: {len(documents)} docs, max score: {max(valid_scores):.3f}")
         return True
     
     def _build_context(self, documents: List[Document], max_length: int = 5000) -> str:
@@ -343,5 +411,7 @@ Answer:"""
                 'confidence': 0.0,
                 'message': f'Error in LLM memory check: {str(e)}'
             }
+
+
 
 

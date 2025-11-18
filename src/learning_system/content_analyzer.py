@@ -119,9 +119,10 @@ class ContentAnalyzer:
             knowledge_query = self._build_knowledge_query(input_text, intent, metadata)
             
             if knowledge_query:
+                
                 # Check vector DB for existing knowledge
                 knowledge_result = self.knowledge_checker.check_knowledge(knowledge_query, k=5)
-                
+                print("knowledge_query",knowledge_result.get('has_knowledge', False))
                 result['has_knowledge'] = knowledge_result.get('has_knowledge', False)
                 result['knowledge_context'] = knowledge_result.get('context', '')
                 result['knowledge_documents'] = knowledge_result.get('documents', [])
