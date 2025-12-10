@@ -15,6 +15,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from src.utils import ExpenseDB
+from src.utils.books_db import BooksDBManager
 
 # Create FastAPI app
 app = FastAPI(
@@ -490,6 +491,392 @@ async def delete_expense(expense_id: int):
         raise HTTPException(status_code=500, detail=f"Error deleting expense record: {str(e)}")
 
 
+# PDF Text Extraction Endpoint
+class PDFTextExtractRequest(BaseModel):
+    book_id: int
+    page_number: int
+    include_next_page: bool = True  # Include text from next page if sentence is incomplete
+    include_previous_page: bool = False  # Include text from previous page to complete sentence
+
+
+class PDFTextExtractResponse(BaseModel):
+    success: bool
+    text: Optional[str] = None
+    message: Optional[str] = None
+    includes_next_page: bool = False
+    includes_previous_page: bool = False
+
+
+def is_sentence_complete(text: str) -> bool:
+    """Check if the text ends with a complete sentence.
+    
+    Args:
+        text: Text to check
+        
+    Returns:
+        True if the last sentence appears complete, False otherwise
+    """
+    if not text or not text.strip():
+        return True
+    
+    # Remove trailing whitespace
+    text = text.rstrip()
+    if not text:
+        return True
+    
+    # Check if ends with sentence-ending punctuation
+    sentence_endings = ['.', '!', '?', '。', '！', '？']
+    if text[-1] in sentence_endings:
+        # Check if it's not an abbreviation (simple heuristic)
+        # Common abbreviations that end with period
+        common_abbreviations = ['Mr.', 'Mrs.', 'Dr.', 'Prof.', 'etc.', 'vs.', 'e.g.', 'i.e.', 'a.m.', 'p.m.', 'Inc.', 'Ltd.', 'St.', 'Ave.']
+        words = text.split()
+        if words:
+            last_word = words[-1]
+            # If last word is a known abbreviation, check if there's more context
+            if last_word in common_abbreviations:
+                # If it's the only word or very short, might be incomplete
+                if len(words) == 1 or len(text) < 50:
+                    return False
+        return True
+    
+    # Check if ends with other punctuation that might indicate continuation
+    continuation_punctuation = [',', ';', ':', '-', '–', '—']
+    if text[-1] in continuation_punctuation:
+        return False
+    
+    # If text doesn't end with sentence punctuation, it's likely incomplete
+    return False
+
+
+def get_complete_sentence_text(text: str, next_page_text: Optional[str] = None) -> str:
+    """Get text with completed sentences, optionally including next page text.
+    
+    Args:
+        text: Current page text
+        next_page_text: Optional text from next page to complete sentences
+        
+    Returns:
+        Text with completed sentences
+    """
+    if not text:
+        return ""
+    
+    # If no next page text or sentence is already complete, return as is
+    if not next_page_text or is_sentence_complete(text):
+        return text
+    
+    # Find the last complete sentence position
+    sentence_endings = ['.', '!', '?', '。', '！', '？']
+    last_complete_pos = -1
+    
+    # Look backwards for sentence-ending punctuation
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] in sentence_endings:
+            # Make sure it's not part of an abbreviation (simple check)
+            if i > 0 and text[i-1].isalpha():
+                last_complete_pos = i
+                break
+    
+    # Split text into complete and incomplete parts
+    if last_complete_pos >= 0:
+        complete_text = text[:last_complete_pos + 1].rstrip()
+        incomplete_part = text[last_complete_pos + 1:].strip()
+    else:
+        # No complete sentences found - entire text might be one incomplete sentence
+        complete_text = ""
+        incomplete_part = text.strip()
+    
+    # Try to complete the sentence from next page
+    if incomplete_part and next_page_text:
+        import re
+        # Get first sentence from next page
+        # Find first sentence ending in next page text
+        first_sentence_match = re.search(r'^([^.!?。！？]*[.!?。！？])', next_page_text.strip(), re.MULTILINE)
+        
+        if first_sentence_match:
+            first_sentence = first_sentence_match.group(1).strip()
+        else:
+            # No sentence ending found, take first line or first 200 chars
+            first_line = next_page_text.strip().split('\n')[0]
+            first_sentence = first_line[:200].strip()
+        
+        # Combine incomplete part with first sentence from next page
+        if incomplete_part:
+            # Remove any trailing punctuation from incomplete part (might be a hyphen or dash)
+            incomplete_clean = incomplete_part.rstrip(' -–—')
+            # Add space if needed
+            if incomplete_clean and not incomplete_clean[-1].isspace():
+                completed = incomplete_clean + " " + first_sentence
+            else:
+                completed = incomplete_clean + first_sentence
+        else:
+            completed = first_sentence
+        
+        # Combine with complete text
+        if complete_text:
+            return complete_text + "\n\n" + completed
+        else:
+            return completed
+    
+    return text
+
+
+def extract_pdf_page_text_accurate(pdf_path: Path, page_number: int, cached_doc=None) -> Optional[str]:
+    """Extract text from a specific PDF page with formatting preserved.
+    This is a copy of the function from the translation page for API use."""
+    try:
+        import fitz  # pymupdf
+        
+        if cached_doc is not None:
+            doc = cached_doc
+            should_close = False
+        else:
+            doc = fitz.open(pdf_path)
+            should_close = True
+        
+        if page_number >= len(doc):
+            if should_close:
+                doc.close()
+            return None
+        
+        page = doc[page_number]
+        
+        # Method 1: Use "dict" format to preserve layout with spacing and newlines
+        try:
+            text_dict = page.get_text("dict")
+            if text_dict and "blocks" in text_dict:
+                result_lines = []
+                prev_y = None
+                
+                for block in text_dict["blocks"]:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            if "spans" in line:
+                                line_text_parts = []
+                                prev_x = None
+                                
+                                for span in line["spans"]:
+                                    span_text = span.get("text", "")
+                                    if not span_text:
+                                        continue
+                                    
+                                    bbox = span.get("bbox", [])
+                                    if len(bbox) >= 4:
+                                        x0 = bbox[0]
+                                        
+                                        if prev_x is not None and x0 > prev_x + 10:
+                                            tabs_needed = int((x0 - prev_x) / 50)
+                                            if tabs_needed > 0:
+                                                line_text_parts.append("\t" * min(tabs_needed, 4))
+                                        
+                                        prev_x = x0 + (bbox[2] - bbox[0])
+                                    
+                                    line_text_parts.append(span_text)
+                                
+                                if line_text_parts:
+                                    line_text = "".join(line_text_parts)
+                                    if line_text.strip():
+                                        result_lines.append(line_text)
+                                        
+                                        bbox = line.get("bbox", [])
+                                        if len(bbox) >= 4:
+                                            current_y = bbox[1]
+                                            if prev_y is not None:
+                                                y_gap = current_y - prev_y
+                                                if y_gap > 20:
+                                                    result_lines.append("")
+                                            prev_y = current_y
+                
+                if result_lines:
+                    result = "\n".join(result_lines)
+                    if result.strip():
+                        if should_close:
+                            doc.close()
+                        return result
+        except Exception:
+            pass
+        
+        # Method 2: Use "text" format - preserves newlines
+        text = page.get_text("text")
+        if text and text.strip():
+            lines = text.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                cleaned = line.rstrip()
+                if cleaned or cleaned_lines:
+                    cleaned_lines.append(cleaned)
+            result = "\n".join(cleaned_lines)
+            if result.strip():
+                if should_close:
+                    doc.close()
+                return result
+        
+        # Method 3: Use blocks extraction
+        blocks = page.get_text("blocks")
+        if blocks:
+            text_lines = []
+            for block in blocks:
+                if len(block) > 4:
+                    block_text = block[4]
+                    if block_text.strip():
+                        text_lines.append(block_text.rstrip())
+                        text_lines.append("")
+            
+            if text_lines:
+                result = "\n".join(text_lines)
+                if result.strip():
+                    if should_close:
+                        doc.close()
+                    return result
+        
+        if should_close:
+            doc.close()
+        return None
+        
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+@app.post("/api/pdf/extract-text", response_model=PDFTextExtractResponse)
+async def extract_pdf_page_text(request: PDFTextExtractRequest):
+    """Extract text from a specific PDF page with formatting preserved.
+    Can optionally include text from next/previous page to complete sentences."""
+    try:
+        import fitz  # pymupdf
+        
+        # Get book from database
+        books_db = BooksDBManager()
+        book = books_db.get_book(request.book_id)
+        
+        if not book:
+            raise HTTPException(status_code=404, detail=f"Book with ID {request.book_id} not found")
+        
+        pdf_path = Path(book['file_path'])
+        if not pdf_path.exists():
+            raise HTTPException(status_code=404, detail=f"PDF file not found: {pdf_path}")
+        
+        # Open PDF document
+        doc = fitz.open(pdf_path)
+        
+        # Validate page number
+        if request.page_number < 0 or request.page_number >= len(doc):
+            doc.close()
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Page number {request.page_number} is out of range. PDF has {len(doc)} pages."
+            )
+        
+        # Extract text from current page
+        try:
+            extracted_text = extract_pdf_page_text_accurate(pdf_path, request.page_number, cached_doc=doc)
+            includes_next = False
+            includes_prev = False
+            
+            # If include_previous_page is True, get text from previous page
+            if request.include_previous_page and request.page_number > 0:
+                prev_text = extract_pdf_page_text_accurate(pdf_path, request.page_number - 1, cached_doc=doc)
+                if prev_text and not is_sentence_complete(prev_text):
+                    # Previous page has incomplete sentence, get the incomplete part
+                    # Find last complete sentence in previous page
+                    sentence_endings = ['.', '!', '?', '。', '！', '？']
+                    last_complete_pos = -1
+                    for i in range(len(prev_text) - 1, -1, -1):
+                        if prev_text[i] in sentence_endings:
+                            if i > 0 and prev_text[i-1].isalpha():
+                                last_complete_pos = i
+                                break
+                    
+                    if last_complete_pos >= 0:
+                        incomplete_from_prev = prev_text[last_complete_pos + 1:].strip()
+                        if incomplete_from_prev:
+                            extracted_text = incomplete_from_prev + " " + (extracted_text or "")
+                            includes_prev = True
+            
+            # If include_next_page is True and sentence is incomplete, get text from next page
+            if request.include_next_page and extracted_text and not is_sentence_complete(extracted_text):
+                if request.page_number < len(doc) - 1:
+                    next_text = extract_pdf_page_text_accurate(pdf_path, request.page_number + 1, cached_doc=doc)
+                    if next_text:
+                        extracted_text = get_complete_sentence_text(extracted_text, next_text)
+                        includes_next = True
+            
+        finally:
+            doc.close()
+        
+        if extracted_text and extracted_text.strip():
+            return PDFTextExtractResponse(
+                success=True,
+                text=extracted_text,
+                message=f"Successfully extracted text from page {request.page_number + 1}" + 
+                       (f" (includes next page)" if includes_next else "") +
+                       (f" (includes previous page)" if includes_prev else ""),
+                includes_next_page=includes_next,
+                includes_previous_page=includes_prev
+            )
+        else:
+            return PDFTextExtractResponse(
+                success=False,
+                text=None,
+                message="No text found on this page. The page might be image-only."
+            )
+            
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"PDF library not available: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error extracting PDF text: {str(e)}")
+
+
+# Translation Save Endpoint
+class TranslationSaveRequest(BaseModel):
+    book_id: int
+    page_number: int
+    translated_text: Optional[str] = None
+    original_text: Optional[str] = None
+
+
+class TranslationSaveResponse(BaseModel):
+    success: bool
+    message: str
+
+
+@app.post("/api/pdf/save-translation", response_model=TranslationSaveResponse)
+async def save_translation(request: TranslationSaveRequest):
+    """Save translation for a specific PDF page."""
+    try:
+        # Get book from database
+        books_db = BooksDBManager()
+        book = books_db.get_book(request.book_id)
+        
+        if not book:
+            raise HTTPException(status_code=404, detail=f"Book with ID {request.book_id} not found")
+        
+        # Save translation
+        success = books_db.save_translation(
+            book_id=request.book_id,
+            page_number=request.page_number,
+            original_text=request.original_text,
+            translated_text=request.translated_text
+        )
+        
+        if success:
+            return TranslationSaveResponse(
+                success=True,
+                message=f"Translation saved for page {request.page_number + 1}"
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Failed to save translation")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving translation: {str(e)}")
+
+
 # Health check endpoint
 @app.get("/api/health")
 async def health_check():
@@ -522,6 +909,8 @@ async def root():
                 "DELETE": "/api/expense/{expense_id}"
             },
             "health": {"GET": "/api/health"},
+            "pdf_extract_text": {"POST": "/api/pdf/extract-text"},
+            "pdf_save_translation": {"POST": "/api/pdf/save-translation"},
             "docs": {"GET": "/docs"}
         }
     }

@@ -85,7 +85,7 @@ class ProfileManager:
         self.save_profiles(profiles)
         
         return True, f"✅ Profile '{name}' created successfully"
-    
+
     def delete_profile(self, profile_id: str) -> tuple[bool, str]:
         """Delete a profile and its knowledge bases.
         

@@ -683,7 +683,9 @@ def _run_auto_discovery(
     analyzer,
     json_template_input: str,
     embedding_model: str,
-    is_from_url: bool = False
+    is_from_url: bool = False,
+    save_to_term_db: bool = False,
+    original_url: str = None
 ):
     """Run auto-discovery process.
     
@@ -699,6 +701,8 @@ def _run_auto_discovery(
         json_template_input: JSON template input
         embedding_model: Embedding model name
         is_from_url: Whether the topic is from a URL (affects search query format)
+        save_to_term_db: Whether to save term data to database
+        original_url: Original URL that led to this term
     """
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -837,6 +841,107 @@ def _run_auto_discovery(
             # Store result in session state for display
             st.session_state.auto_discovery_result = discovery_result
             st.session_state.auto_discovery_completed = True
+            
+            # Save to term database if enabled
+            if save_to_term_db:
+                try:
+                    from src.utils.term_db import TermDBManager
+                    from urllib.parse import urlparse
+                    
+                    term_db = TermDBManager()
+                    
+                    # Extract domain from original URL or analysis result
+                    domain = None
+                    if original_url:
+                        try:
+                            parsed = urlparse(original_url)
+                            domain = parsed.netloc.replace('www.', '')
+                        except Exception:
+                            pass
+                    
+                    if not domain and analysis_result.get('domain'):
+                        domain = analysis_result.get('domain')
+                    
+                    # Add or update term
+                    term_id = term_db.add_term(
+                        term=extracted_topic,
+                        original_url=original_url,
+                        domain=domain,
+                        status='active'
+                    )
+                    
+                    # Store extracted content
+                    extracted_content = discovery_result.get('extracted_content', [])
+                    for item in extracted_content:
+                        if item.get('success') and item.get('content'):
+                            term_db.add_content(
+                                term_id=term_id,
+                                content=item.get('content', ''),
+                                source_url=item.get('url', ''),
+                                relevance_score=item.get('relevance_score'),
+                                confidence_score=item.get('confidence_score', 1.0),
+                                chunk_count=0  # Will be updated if available
+                            )
+                    
+                    # Store source URLs as links (mark visited ones)
+                    source_urls = discovery_result.get('source_urls', [])
+                    visited_urls = set()
+                    for item in extracted_content:
+                        if item.get('url'):
+                            visited_urls.add(item.get('url'))
+                    
+                    # Collect discovered links from pages
+                    discovered_links_list = discovery_result.get('discovered_links', [])
+                    
+                    # Remove duplicates
+                    unique_discovered_links = {}
+                    for link in discovered_links_list:
+                        url = link.get('url', '')
+                        if url and url not in unique_discovered_links:
+                            unique_discovered_links[url] = link
+                    
+                    discovered_urls = [link['url'] for link in unique_discovered_links.values()]
+                    
+                    # Store discovered links (prioritize related ones)
+                    if discovered_urls:
+                        # Prioritize related links
+                        related_urls = [link['url'] for link in unique_discovered_links.values() if link.get('is_related', False)]
+                        other_urls = [url for url in discovered_urls if url not in related_urls]
+                        
+                        # Store all related links, and up to 20 other links
+                        urls_to_store = related_urls + other_urls[:20]
+                        
+                        if urls_to_store:
+                            term_db.add_links(
+                                term_id=term_id,
+                                urls=urls_to_store,
+                                visited=False,
+                                link_type='external'
+                            )
+                    
+                    if source_urls:
+                        # Add all source URLs
+                        term_db.add_links(
+                            term_id=term_id,
+                            urls=source_urls,
+                            visited=False,
+                            link_type='external'
+                        )
+                        
+                        # Mark visited URLs
+                        for url in visited_urls:
+                            term_db.mark_link_visited(term_id, url)
+                    
+                    # Update last gathered timestamp
+                    term_db.update_term_last_gathered(term_id)
+                    
+                    logger.info(f"✅ Saved term '{extracted_topic}' to database (ID: {term_id})")
+                    logger.info(f"   - Content items: {len([item for item in extracted_content if item.get('success')])}")
+                    logger.info(f"   - Links stored: {len(source_urls)}")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to save term to database: {str(e)}")
+                    # Don't fail the entire process if database save fails
             
         else:
             error_msg = discovery_result.get('error', 'Unknown error')
@@ -1530,7 +1635,9 @@ with tab1:
                                     analyzer=analyzer,
                                     json_template_input=json_template_input,
                                     embedding_model=embedding_model,
-                                    is_from_url=True  # Mark as from URL for better search queries
+                                    is_from_url=True,  # Mark as from URL for better search queries
+                                    save_to_term_db=True,  # Save to term database
+                                    original_url=url_input.strip()  # Pass original URL for term storage
                                 )
                             elif analysis_result.get('has_knowledge'):
                                 st.success("✅ **Knowledge Found**")

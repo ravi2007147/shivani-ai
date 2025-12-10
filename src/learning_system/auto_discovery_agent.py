@@ -18,7 +18,7 @@ from langchain_ollama import OllamaLLM
 from langchain_core.documents import Document
 
 from src.rag import VectorStoreManager # For storing in vector DB
-from src.config import MAX_URLS_TO_EXTRACT, MAX_SEARCH_RESULTS, MAX_PAGES_TO_CRAWL
+from src.config import MAX_URLS_TO_EXTRACT, MAX_SEARCH_RESULTS, MAX_PAGES_TO_CRAWL, MAX_CRAWL_DEPTH
 from src.relevance_detector import RelevanceDetector
 
 logger = logging.getLogger(__name__)
@@ -646,20 +646,39 @@ class AutoDiscoveryAgent:
                         else:
                             logger.warning(f"      ⚠️ Content verified as NOT RELEVANT - discarding: {verification_reason}")
                     
+                    # Extract and analyze links from this page
+                    discovered_links = []
+                    if topic:
+                        discovered_links = self._extract_and_analyze_links_from_page(url, topic)
+                    
                     # Only add to extracted_content if verified or if no topic provided
                     if is_relevant or not topic:
-                        extracted_content.append({
+                        item = {
                             'url': url,
                             'content': content if is_relevant or not topic else '',  # Clear content if not relevant
                             'success': True,
                             'verified': is_relevant if topic else None,
-                            'verification_reason': verification_reason if topic else None
-                        })
+                            'verification_reason': verification_reason if topic else None,
+                            'discovered_links': discovered_links  # Include discovered links
+                        }
+                        extracted_content.append(item)
                         
                         if is_relevant or not topic:
                             logger.info(f"      ✅ Content extracted and {'verified' if topic else 'stored'}: {original_length if original_length > max_content_length else len(content)} chars")
+                            if discovered_links:
+                                related_count = sum(1 for l in discovered_links if l.get('is_related'))
+                                logger.info(f"      🔗 Discovered {len(discovered_links)} links ({related_count} related to topic)")
                     else:
-                        # Page is not relevant - skip it
+                        # Page is not relevant - skip it, but still save discovered links if any
+                        if discovered_links:
+                            extracted_content.append({
+                                'url': url,
+                                'content': '',
+                                'success': False,
+                                'verified': False,
+                                'error': 'Page not relevant to topic',
+                                'discovered_links': discovered_links  # Still save links even if page not relevant
+                            })
                         logger.info(f"      ⏭️ Skipping non-relevant page: {url}")
                 else:
                     logger.warning(f"      ⚠️ No meaningful content extracted from {url}")
@@ -741,6 +760,145 @@ class AutoDiscoveryAgent:
         # Assume relative URLs are internal
         return True
     
+    def _is_link_related_to_topic(self, url: str, topic: str, link_text: str = None) -> Tuple[bool, str]:
+        """Check if a link is SEO-friendly or semantically related to a topic.
+        
+        Args:
+            url: Link URL
+            topic: Topic/term to check against
+            link_text: Optional link text/anchor text
+            
+        Returns:
+            Tuple of (is_related, reason)
+        """
+        try:
+            from urllib.parse import urlparse, unquote
+            
+            # Normalize topic for comparison
+            topic_lower = topic.lower().strip()
+            topic_words = topic_lower.split()
+            
+            # Parse URL
+            parsed = urlparse(url)
+            path_lower = parsed.path.lower()
+            domain_lower = parsed.netloc.lower()
+            
+            # Extract keywords from URL path (SEO-friendly URLs)
+            path_segments = [seg for seg in path_lower.split('/') if seg]
+            
+            # Check 1: Domain contains topic
+            if any(word in domain_lower for word in topic_words if len(word) > 3):
+                return True, f"Domain contains topic keyword: {topic}"
+            
+            # Check 2: URL path contains topic keywords (SEO-friendly)
+            url_text = ' '.join(path_segments)
+            if any(word in url_text for word in topic_words if len(word) > 3):
+                return True, f"URL path contains topic keyword: {topic}"
+            
+            # Check 3: Link text contains topic
+            if link_text:
+                link_text_lower = link_text.lower()
+                if any(word in link_text_lower for word in topic_words if len(word) > 3):
+                    return True, f"Link text contains topic keyword: {topic}"
+            
+            # Check 4: URL contains common content-related keywords along with topic
+            content_keywords = ['about', 'services', 'products', 'company', 'blog', 'article', 
+                               'guide', 'tutorial', 'help', 'support', 'faq', 'contact',
+                               'team', 'careers', 'news', 'press', 'resources']
+            
+            # Decode URL-encoded characters
+            decoded_path = unquote(path_lower)
+            decoded_url = unquote(url.lower())
+            
+            # If URL has content keywords AND topic-related segments
+            has_content_keyword = any(kw in decoded_url for kw in content_keywords)
+            url_segments_text = ' '.join([unquote(seg) for seg in path_segments])
+            
+            # Check if any topic word appears in URL segments
+            topic_in_url = any(word in url_segments_text for word in topic_words if len(word) > 3)
+            
+            if has_content_keyword and topic_in_url:
+                return True, f"URL contains content keyword and topic: {topic}"
+            
+            # Check 5: Use LLM for semantic analysis if available (lightweight check)
+            # For now, return False for strict filtering
+            # Can be enhanced with LLM-based semantic similarity
+            
+            return False, "Link does not appear to be related to topic"
+            
+        except Exception as e:
+            logger.warning(f"Error checking link relation: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
+    def _extract_and_analyze_links_from_page(self, current_url: str, topic: str = None) -> List[Dict[str, str]]:
+        """Extract and analyze links from a page to find related links.
+        
+        Args:
+            current_url: Current page URL
+            topic: Optional topic to check link relevance against
+            
+        Returns:
+            List of dictionaries with link information (url, link_text, is_related, reason)
+        """
+        discovered_links = []
+        
+        try:
+            # Find all links on the page
+            links = self.page.query_selector_all('a[href]')
+            
+            for link in links:
+                try:
+                    href = link.get_attribute('href')
+                    if not href:
+                        continue
+                    
+                    # Normalize URL
+                    normalized_url = self._normalize_url(current_url, href)
+                    if not normalized_url:
+                        continue
+                    
+                    # Skip if same as current URL
+                    if normalized_url == current_url:
+                        continue
+                    
+                    # Get link text
+                    link_text = None
+                    try:
+                        link_text = link.inner_text().strip()
+                    except:
+                        pass
+                    
+                    # Check if link is related to topic (if topic provided)
+                    is_related = False
+                    reason = ""
+                    
+                    if topic:
+                        is_related, reason = self._is_link_related_to_topic(
+                            normalized_url,
+                            topic,
+                            link_text
+                        )
+                    
+                    # Add to discovered links
+                    discovered_links.append({
+                        'url': normalized_url,
+                        'link_text': link_text or '',
+                        'is_related': is_related,
+                        'reason': reason,
+                        'domain': self._get_domain_from_url(normalized_url)
+                    })
+                    
+                except Exception as e:
+                    logger.debug(f"Error extracting link: {str(e)}")
+                    continue
+            
+            logger.info(f"      🔗 Extracted {len(discovered_links)} links from page ({sum(1 for l in discovered_links if l['is_related'])} related to topic)")
+            
+        except Exception as e:
+            logger.warning(f"Error extracting links from page: {str(e)}")
+        
+        return discovered_links
+    
     def _normalize_url(self, base_url: str, link_url: str) -> Optional[str]:
         """Normalize a URL (convert relative to absolute).
         
@@ -820,27 +978,36 @@ class AutoDiscoveryAgent:
         start_url: str,
         max_pages: int = 15,
         max_content_length: int = 10000,  # Increased to 10000 to capture more content per page
-        topic: str = None  # Topic for real-time LLM verification
+        topic: str = None,  # Topic for real-time LLM verification
+        max_depth: int = None  # Maximum crawl depth (default: MAX_CRAWL_DEPTH from config)
     ) -> List[Dict[str, str]]:
         """Crawl multiple pages from a website starting from a given URL.
         
         This method:
-        1. Starts from the given URL (homepage or entry page)
+        1. Starts from the given URL (homepage or entry page) - depth 0
         2. Extracts all internal links from the page
-        3. Visits those links to extract content
-        4. Continues until max_pages is reached or no more internal links are found
+        3. Visits those links (depth 1) to extract content
+        4. Optionally continues to depth 2 if max_depth allows
+        5. Continues until max_pages is reached or max_depth is exceeded or no more internal links are found
         
         Args:
             start_url: Starting URL (homepage or entry page)
             max_pages: Maximum number of pages to crawl (default: 15)
-            max_content_length: Maximum content length per page (default: 5000)
+            max_content_length: Maximum content length per page (default: 10000)
+            topic: Topic for real-time LLM verification
+            max_depth: Maximum crawl depth (0 = only start URL, 1 = start + direct links, 2 = up to 2 levels deep)
+                      Default: MAX_CRAWL_DEPTH from config
             
         Returns:
             List of dictionaries with url and content
         """
+        if max_depth is None:
+            max_depth = MAX_CRAWL_DEPTH
+        
         extracted_content = []
         visited_urls = set()
-        urls_to_visit = [start_url]
+        # Use tuples of (url, depth) to track depth level
+        urls_to_visit = [(start_url, 0)]  # Start URL is at depth 0
         base_domain = self._get_domain_from_url(start_url)
         
         if not base_domain:
@@ -850,13 +1017,19 @@ class AutoDiscoveryAgent:
         logger.info(f"   🌐 Starting website crawl from: {start_url}")
         logger.info(f"   - Domain: {base_domain}")
         logger.info(f"   - Max pages to crawl: {max_pages}")
+        logger.info(f"   - Max crawl depth: {max_depth} (0 = only start URL, 1 = start + direct links, 2 = up to 2 levels)")
         
         # Ensure browser is initialized
         self._initialize_browser()
         
         page_count = 0
         while urls_to_visit and page_count < max_pages:
-            current_url = urls_to_visit.pop(0)
+            current_url, current_depth = urls_to_visit.pop(0)
+            
+            # Skip if depth exceeds max_depth
+            if current_depth > max_depth:
+                logger.debug(f"      ⏭️ Skipping {current_url} - depth {current_depth} exceeds max_depth {max_depth}")
+                continue
             
             # Skip if already visited
             if current_url in visited_urls:
@@ -870,7 +1043,7 @@ class AutoDiscoveryAgent:
             page_count += 1
             
             try:
-                logger.info(f"   📄 [{page_count}/{max_pages}] Crawling: {current_url}")
+                logger.info(f"   📄 [{page_count}/{max_pages}] [Depth {current_depth}/{max_depth}] Crawling: {current_url}")
                 
                 # Navigate to URL
                 try:
@@ -954,20 +1127,39 @@ class AutoDiscoveryAgent:
                         else:
                             logger.warning(f"      ⚠️ Content verified as NOT RELEVANT - discarding: {verification_reason}")
                     
+                    # Extract and analyze links from this page
+                    discovered_links = []
+                    if topic:
+                        discovered_links = self._extract_and_analyze_links_from_page(current_url, topic)
+                    
                     # Only add to extracted_content if verified or if no topic provided (for backward compatibility)
                     if is_relevant or not topic:
-                        extracted_content.append({
+                        item = {
                             'url': current_url,
                             'content': content if is_relevant or not topic else '',  # Clear content if not relevant
                             'success': True,
                             'verified': is_relevant if topic else None,
-                            'verification_reason': verification_reason if topic else None
-                        })
+                            'verification_reason': verification_reason if topic else None,
+                            'discovered_links': discovered_links  # Include discovered links
+                        }
+                        extracted_content.append(item)
                         
                         if is_relevant or not topic:
                             logger.info(f"      ✅ Content extracted and {'verified' if topic else 'stored'}: {len(content)} chars")
+                            if discovered_links:
+                                related_count = sum(1 for l in discovered_links if l.get('is_related'))
+                                logger.info(f"      🔗 Discovered {len(discovered_links)} links ({related_count} related to topic)")
                     else:
-                        # Page is not relevant - skip it
+                        # Still save discovered links even if page not relevant
+                        if discovered_links:
+                            extracted_content.append({
+                                'url': current_url,
+                                'content': '',
+                                'success': False,
+                                'verified': False,
+                                'error': 'Page not relevant to topic',
+                                'discovered_links': discovered_links
+                            })
                         logger.info(f"      ⏭️ Skipping non-relevant page: {current_url}")
                 else:
                     logger.warning(f"      ⚠️ No meaningful content from {current_url}")
@@ -979,12 +1171,14 @@ class AutoDiscoveryAgent:
                         'verified': False
                     })
                 
-                # Extract internal links from the page (only if we haven't reached max_pages)
-                if page_count < max_pages:
+                # Extract internal links from the page (only if we haven't reached max_pages and haven't exceeded depth)
+                # Only add links if current_depth < max_depth (so we don't process links beyond max_depth)
+                if page_count < max_pages and current_depth < max_depth:
                     try:
                         # Find all links on the page
                         links = self.page.query_selector_all('a[href]')
                         
+                        new_links_count = 0
                         for link in links:
                             try:
                                 href = link.get_attribute('href')
@@ -1001,17 +1195,25 @@ class AutoDiscoveryAgent:
                                     continue
                                 
                                 # Check if already visited or queued
-                                if normalized_url not in visited_urls and normalized_url not in urls_to_visit:
-                                    # Add to queue if same domain
+                                # Check against visited_urls and urls_to_visit (which now contains tuples)
+                                is_visited = normalized_url in visited_urls
+                                is_queued = any(url == normalized_url for url, _ in urls_to_visit)
+                                
+                                if not is_visited and not is_queued:
+                                    # Add to queue if same domain and depth allows
                                     if self._is_same_domain(start_url, normalized_url):
-                                        urls_to_visit.append(normalized_url)
-                                        logger.debug(f"      ➕ Found internal link: {normalized_url}")
+                                        next_depth = current_depth + 1
+                                        urls_to_visit.append((normalized_url, next_depth))
+                                        new_links_count += 1
+                                        logger.debug(f"      ➕ Found internal link (depth {next_depth}): {normalized_url}")
                             except Exception:
                                 continue
                         
-                        logger.info(f"      🔗 Found {len(urls_to_visit)} internal links to visit")
+                        logger.info(f"      🔗 Found {new_links_count} new internal links to visit (will be at depth {current_depth + 1})")
                     except Exception as e:
                         logger.warning(f"      ⚠️ Error extracting links: {str(e)}")
+                elif current_depth >= max_depth:
+                    logger.debug(f"      ⏭️ Skipping link extraction - depth {current_depth} >= max_depth {max_depth}")
                 
             except Exception as e:
                 logger.error(f"      ❌ Error crawling {current_url}: {str(e)}")
@@ -1711,6 +1913,25 @@ Summarized Knowledge about {topic}:
             # Combine all extracted content
             extracted_content = primary_content + additional_content
             
+            # Collect all discovered links from extracted content
+            all_discovered_links = []
+            for item in extracted_content:
+                discovered_links = item.get('discovered_links', [])
+                if discovered_links:
+                    all_discovered_links.extend(discovered_links)
+            
+            # Remove duplicates (by URL)
+            unique_discovered_links = {}
+            for link in all_discovered_links:
+                url = link.get('url', '')
+                if url and url not in unique_discovered_links:
+                    unique_discovered_links[url] = link
+            
+            discovered_links_list = list(unique_discovered_links.values())
+            related_links = [l for l in discovered_links_list if l.get('is_related', False)]
+            
+            logger.info(f"   🔗 Discovered {len(discovered_links_list)} unique links ({len(related_links)} related to topic)")
+            
             successful_extractions = sum(1 for item in extracted_content if item.get('success'))
             logger.info(f"   ✅ Total: Successfully extracted content from {successful_extractions}/{len(extracted_content)} URLs")
             
@@ -1843,7 +2064,8 @@ Summarized Knowledge about {topic}:
                         'error': None,
                         'search_results': search_results,
                         'extracted_content': extracted_content,
-                        'source_urls': source_urls  # Include source URLs in result
+                        'source_urls': source_urls,  # Include source URLs in result
+                        'discovered_links': discovered_links_list  # Include discovered links from pages
                     }
                 except Exception as e:
                     logger.error(f"   ❌ Error storing knowledge in vector DB: {str(e)}", exc_info=True)
@@ -1870,7 +2092,8 @@ Summarized Knowledge about {topic}:
                     'error': None,
                     'search_results': search_results,
                     'extracted_content': extracted_content,
-                    'source_urls': source_urls
+                    'source_urls': source_urls,
+                    'discovered_links': discovered_links_list  # Include discovered links from pages
                 }
                 
         except Exception as e:
