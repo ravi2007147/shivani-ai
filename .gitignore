@@ -4,7 +4,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
-
+*.pdf
+*.png
+*.jpg
 # Python - Build artifacts (these are generated, not needed in repo)
 build/
 develop-eggs/
