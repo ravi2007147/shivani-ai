@@ -8,6 +8,7 @@ __pycache__/
 *.png
 *.jpg
 # Python - Build artifacts (these are generated, not needed in repo)
+shivani-env/
 build/
 develop-eggs/
 dist/

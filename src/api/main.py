@@ -2,12 +2,19 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 from datetime import date, datetime
 from calendar import monthrange
 import sys
 from pathlib import Path
+import io
+import tempfile
+import os
+import zipfile
+import json
+import re
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -877,6 +884,1885 @@ async def save_translation(request: TranslationSaveRequest):
         raise HTTPException(status_code=500, detail=f"Error saving translation: {str(e)}")
 
 
+class PDFGenerateRequest(BaseModel):
+    book_id: int
+
+
+@app.post("/api/pdf/generate-translated-pdf")
+async def generate_translated_pdf(request: PDFGenerateRequest):
+    """Generate a PDF file with all translated text for a book."""
+    try:
+        # Get book from database
+        books_db = BooksDBManager()
+        book = books_db.get_book(request.book_id)
+        
+        if not book:
+            raise HTTPException(status_code=404, detail=f"Book with ID {request.book_id} not found")
+        
+        # Get all translations
+        translations = books_db.get_all_translations(request.book_id)
+        
+        if not translations:
+            raise HTTPException(status_code=400, detail="No translations found for this book")
+        
+        # Filter translations that have translated_text
+        translations_with_text = [
+            t for t in translations 
+            if t.get('translated_text') and t.get('translated_text').strip()
+        ]
+        
+        if not translations_with_text:
+            raise HTTPException(status_code=400, detail="No translated text found for this book")
+        
+        # Sort by page number
+        translations_with_text.sort(key=lambda x: x.get('page_number', 0))
+        
+        book_title = book.get('title', f"Book {request.book_id}")
+        safe_title = "".join(c for c in book_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        filename = f"{safe_title}_translated.pdf"
+        
+        # Try different PDF libraries in order of preference for Hindi/Unicode support
+        USE_WEASYPRINT = False
+        USE_XHTML2PDF = False
+        USE_REPORTLAB = False
+        
+        # First try weasyprint - best Unicode/Devanagari support via HTML/CSS rendering
+        try:
+            from weasyprint import HTML, CSS
+            from weasyprint.text.fonts import FontConfiguration
+            USE_WEASYPRINT = True
+        except ImportError:
+            pass
+        
+        # Second try xhtml2pdf (pisa) - good Unicode support
+        if not USE_WEASYPRINT:
+            try:
+                from xhtml2pdf import pisa
+                USE_XHTML2PDF = True
+            except ImportError:
+                pass
+        
+        # Last resort: reportlab
+        if not USE_WEASYPRINT and not USE_XHTML2PDF:
+            try:
+                from reportlab.lib.pagesizes import letter, A4
+                from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                from reportlab.lib.units import inch
+                from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+                from reportlab.lib.enums import TA_LEFT, TA_CENTER
+                from reportlab.pdfbase import pdfmetrics
+                from reportlab.pdfbase.ttfonts import TTFont
+                from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+                USE_REPORTLAB = True
+            except ImportError:
+                USE_REPORTLAB = False
+        
+        if USE_WEASYPRINT:
+            # Generate PDF using weasyprint - excellent Unicode/Devanagari support
+            # Build HTML content with proper CSS for Hindi text
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    @page {{
+                        size: A4;
+                        margin: 2cm;
+                    }}
+                    body {{
+                        font-family: 'Noto Sans Devanagari', 'Lohit Devanagari', 'DejaVu Sans', sans-serif;
+                        font-size: 11pt;
+                        line-height: 1.6;
+                        color: #000;
+                    }}
+                    h1 {{
+                        font-size: 18pt;
+                        text-align: center;
+                        margin-bottom: 20px;
+                        color: #000;
+                    }}
+                    h2 {{
+                        font-size: 14pt;
+                        color: #333;
+                        margin-top: 30px;
+                        margin-bottom: 10px;
+                    }}
+                    .page-content {{
+                        margin-bottom: 30px;
+                        white-space: pre-wrap;
+                        word-wrap: break-word;
+                    }}
+                    .page-header {{
+                        font-size: 14pt;
+                        font-weight: bold;
+                        color: #333;
+                        margin-top: 20px;
+                        margin-bottom: 12px;
+                    }}
+                </style>
+            </head>
+            <body>
+                <h1>{book_title}</h1>
+                <h2>Translated Text</h2>
+            """
+            
+            # Add translations page by page
+            for trans in translations_with_text:
+                page_num = trans.get('page_number', 0) + 1
+                translated_text = trans.get('translated_text', '').strip()
+                
+                if translated_text:
+                    # Escape HTML but preserve Unicode
+                    import html as html_escape
+                    # Convert markdown to HTML
+                    import re
+                    formatted_text = translated_text
+                    # Convert **bold** to <strong>bold</strong>
+                    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', formatted_text)
+                    # Convert *italic* to <em>italic</em>
+                    formatted_text = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<em>\1</em>', formatted_text)
+                    # Convert line breaks
+                    formatted_text = formatted_text.replace('\n', '<br/>')
+                    # Escape HTML special characters in text (but keep our tags)
+                    parts = re.split(r'(<[^>]+>)', formatted_text)
+                    escaped_parts = []
+                    for part in parts:
+                        if part.startswith('<') and part.endswith('>'):
+                            escaped_parts.append(part)
+                        else:
+                            escaped_parts.append(html_escape.escape(part))
+                    formatted_text = ''.join(escaped_parts)
+                    
+                    html_content += f"""
+                    <div class="page-header">Page {page_num}</div>
+                    <div class="page-content">{formatted_text}</div>
+                    """
+            
+            html_content += """
+            </body>
+            </html>
+            """
+            
+            # Generate PDF
+            buffer = io.BytesIO()
+            HTML(string=html_content).write_pdf(buffer)
+            buffer.seek(0)
+            
+            return StreamingResponse(
+                io.BytesIO(buffer.read()),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+        
+        elif USE_XHTML2PDF:
+            # Generate PDF using xhtml2pdf (pisa) - good Unicode support
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    @page {{
+                        size: A4;
+                        margin: 2cm;
+                    }}
+                    body {{
+                        font-family: 'Noto Sans Devanagari', 'Lohit Devanagari', 'DejaVu Sans', sans-serif;
+                        font-size: 11pt;
+                        line-height: 1.6;
+                        color: #000;
+                    }}
+                    h1 {{
+                        font-size: 18pt;
+                        text-align: center;
+                        margin-bottom: 20px;
+                    }}
+                    h2 {{
+                        font-size: 14pt;
+                        color: #333;
+                        margin-top: 30px;
+                        margin-bottom: 10px;
+                    }}
+                    .page-content {{
+                        margin-bottom: 30px;
+                        white-space: pre-wrap;
+                        word-wrap: break-word;
+                    }}
+                    .page-header {{
+                        font-size: 14pt;
+                        font-weight: bold;
+                        color: #333;
+                        margin-top: 20px;
+                        margin-bottom: 12px;
+                    }}
+                </style>
+            </head>
+            <body>
+                <h1>{book_title}</h1>
+                <h2>Translated Text</h2>
+            """
+            
+            # Add translations page by page
+            for trans in translations_with_text:
+                page_num = trans.get('page_number', 0) + 1
+                translated_text = trans.get('translated_text', '').strip()
+                
+                if translated_text:
+                    # Convert markdown to HTML
+                    import re
+                    import html as html_escape
+                    formatted_text = translated_text
+                    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', formatted_text)
+                    formatted_text = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<em>\1</em>', formatted_text)
+                    formatted_text = formatted_text.replace('\n', '<br/>')
+                    # Escape HTML
+                    parts = re.split(r'(<[^>]+>)', formatted_text)
+                    escaped_parts = []
+                    for part in parts:
+                        if part.startswith('<') and part.endswith('>'):
+                            escaped_parts.append(part)
+                        else:
+                            escaped_parts.append(html_escape.escape(part))
+                    formatted_text = ''.join(escaped_parts)
+                    
+                    html_content += f"""
+                    <div class="page-header">Page {page_num}</div>
+                    <div class="page-content">{formatted_text}</div>
+                    """
+            
+            html_content += """
+            </body>
+            </html>
+            """
+            
+            # Generate PDF
+            buffer = io.BytesIO()
+            pisa.CreatePDF(html_content, dest=buffer, encoding='utf-8')
+            buffer.seek(0)
+            
+            return StreamingResponse(
+                io.BytesIO(buffer.read()),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+        
+        elif USE_REPORTLAB:
+            # Generate PDF using reportlab with Unicode support
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=A4, 
+                                   rightMargin=72, leftMargin=72,
+                                   topMargin=72, bottomMargin=72)
+            
+            # Register Unicode fonts for Hindi/Devanagari support with proper matra positioning
+            # We need a font specifically designed for Devanagari script
+            try:
+                import platform
+                system = platform.system()
+                
+                hindi_font_registered = False
+                font_name = 'Helvetica'  # Default fallback
+                
+                if system == "Linux":
+                    # Try common Hindi fonts on Linux - prioritize Noto Sans Devanagari for best matra support
+                    # Noto Sans Devanagari is specifically designed for proper matra positioning
+                    font_paths = []
+                    
+                    # First, try to find NotoSansDevanagari-Regular.ttf (best for Hindi matras)
+                    import subprocess
+                    try:
+                        result = subprocess.run(
+                            ['find', '/usr/share/fonts', '-name', 'NotoSansDevanagari-Regular.ttf'],
+                            capture_output=True, text=True, timeout=2
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            font_paths.append(result.stdout.strip().split('\n')[0])
+                    except:
+                        pass
+                    
+                    # Add other common paths
+                    font_paths.extend([
+                        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+                        "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.otf",
+                        "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
+                        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+                        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    ])
+                    
+                    # Also check in user's home directory
+                    home_font_paths = [
+                        os.path.expanduser("~/.fonts/NotoSansDevanagari-Regular.ttf"),
+                        os.path.expanduser("~/.local/share/fonts/NotoSansDevanagari-Regular.ttf"),
+                    ]
+                    font_paths.extend(home_font_paths)
+                    
+                    for font_path in font_paths:
+                        if os.path.exists(font_path):
+                            try:
+                                pdfmetrics.registerFont(TTFont('HindiFont', font_path))
+                                hindi_font_registered = True
+                                font_name = 'HindiFont'
+                                print(f"Successfully registered Hindi font: {font_path}")
+                                break
+                            except Exception as e:
+                                print(f"Failed to register font {font_path}: {e}")
+                                continue
+                
+                # If no system font found, try UnicodeCIDFont which has better Devanagari support
+                if not hindi_font_registered:
+                    try:
+                        # Try different CID fonts that support Devanagari
+                        cid_fonts = ['HeiseiKakuGo-W5', 'HeiseiMin-W3', 'KozMinPro-Regular']
+                        for cid_font in cid_fonts:
+                            try:
+                                pdfmetrics.registerFont(UnicodeCIDFont(cid_font))
+                                hindi_font_registered = True
+                                font_name = cid_font
+                                print(f"Successfully registered CID font: {cid_font}")
+                                break
+                            except:
+                                continue
+                    except Exception as e:
+                        print(f"Failed to register CID font: {e}")
+                
+                # Final fallback - use Helvetica (won't support Hindi well, but won't crash)
+                if not hindi_font_registered:
+                    print("Warning: No Hindi-supporting font found. PDF may not display Hindi correctly.")
+                    font_name = 'Helvetica'
+                    
+            except Exception as e:
+                # Fallback to basic font
+                font_name = 'Helvetica'
+                print(f"Warning: Could not register Hindi font: {e}")
+            
+            # Container for the 'Flowable' objects
+            story = []
+            
+            # Define styles with Unicode font
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontName=font_name,
+                fontSize=18,
+                textColor='#000000',
+                spaceAfter=30,
+                alignment=TA_CENTER
+            )
+            page_header_style = ParagraphStyle(
+                'PageHeader',
+                parent=styles['Heading2'],
+                fontName=font_name,
+                fontSize=14,
+                textColor='#333333',
+                spaceAfter=12,
+                spaceBefore=20
+            )
+            body_style = ParagraphStyle(
+                'CustomBody',
+                parent=styles['Normal'],
+                fontName=font_name,
+                fontSize=11,
+                leading=14,
+                alignment=TA_LEFT,
+                spaceAfter=12
+            )
+            
+            # Add title
+            book_title = book.get('title', f"Book {request.book_id}")
+            story.append(Paragraph(book_title, title_style))
+            story.append(Spacer(1, 0.2*inch))
+            story.append(Paragraph("Translated Text", styles['Heading2']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Add translations page by page
+            for trans in translations_with_text:
+                page_num = trans.get('page_number', 0) + 1  # Convert to 1-indexed
+                translated_text = trans.get('translated_text', '').strip()
+                
+                if translated_text:
+                    # Add page header
+                    story.append(Paragraph(f"Page {page_num}", page_header_style))
+                    
+                    # Convert markdown-like formatting to HTML for reportlab
+                    # Simple markdown to HTML conversion
+                    import re
+                    from xml.sax.saxutils import escape
+                    
+                    formatted_text = translated_text
+                    
+                    # First convert markdown to HTML tags (before escaping)
+                    # Convert **bold** to <b>bold</b>
+                    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', formatted_text)
+                    # Convert *italic* to <i>italic</i> (but not if it's part of **)
+                    formatted_text = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<i>\1</i>', formatted_text)
+                    
+                    # Convert line breaks
+                    formatted_text = formatted_text.replace('\n', '<br/>')
+                    
+                    # Now escape HTML special characters in the text content (but preserve our HTML tags)
+                    # We need to escape &, <, > but keep our HTML tags intact
+                    # Split by HTML tags, escape text parts, then rejoin
+                    parts = re.split(r'(<[^>]+>)', formatted_text)
+                    escaped_parts = []
+                    for part in parts:
+                        if part.startswith('<') and part.endswith('>'):
+                            # It's an HTML tag, keep it as is
+                            escaped_parts.append(part)
+                        else:
+                            # It's text content, escape HTML special chars but preserve Unicode
+                            # Use escape() which preserves Unicode characters
+                            escaped_parts.append(escape(part))
+                    formatted_text = ''.join(escaped_parts)
+                    
+                    # Ensure the text is properly encoded as UTF-8 for reportlab
+                    # reportlab's Paragraph should handle Unicode, but we ensure it's clean
+                    try:
+                        # Verify it's valid UTF-8
+                        formatted_text.encode('utf-8')
+                    except UnicodeEncodeError:
+                        # If encoding fails, replace problematic characters
+                        formatted_text = formatted_text.encode('utf-8', 'replace').decode('utf-8')
+                    
+                    # Add translated text - Paragraph handles Unicode automatically
+                    # The font we registered (Noto Sans Devanagari) should properly render matras
+                    story.append(Paragraph(formatted_text, body_style))
+                    story.append(Spacer(1, 0.2*inch))
+                    story.append(PageBreak())
+            
+            # Build PDF
+            doc.build(story)
+            buffer.seek(0)
+            
+            return StreamingResponse(
+                io.BytesIO(buffer.read()),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+        else:
+            # Fallback: Generate simple text-based PDF using fpdf2 (Unicode support)
+            try:
+                # Try fpdf2 which has better Unicode support
+                try:
+                    from fpdf import FPDF
+                    USE_FPDF2 = False
+                except:
+                    from fpdf2 import FPDF
+                    USE_FPDF2 = True
+                
+                pdf = FPDF()
+                pdf.set_auto_page_break(auto=True, margin=15)
+                
+                # Add pages
+                book_title = book.get('title', f"Book {request.book_id}")
+                
+                for trans in translations_with_text:
+                    page_num = trans.get('page_number', 0) + 1
+                    translated_text = trans.get('translated_text', '').strip()
+                    
+                    if translated_text:
+                        pdf.add_page()
+                        
+                        # Try to use a font that supports Hindi
+                        try:
+                            # fpdf2 supports Unicode better
+                            if USE_FPDF2:
+                                pdf.add_font('DejaVu', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
+                                pdf.set_font('DejaVu', '', 11)
+                            else:
+                                pdf.set_font("Arial", "", 11)
+                        except:
+                            # Fallback to default font
+                            try:
+                                pdf.set_font("Arial", "", 11)
+                            except:
+                                pass
+                        
+                        pdf.set_font("Arial", "B", 16)
+                        pdf.cell(0, 10, f"Page {page_num}", ln=1)
+                        pdf.ln(5)
+                        
+                        try:
+                            if USE_FPDF2:
+                                pdf.set_font('DejaVu', '', 11)
+                            else:
+                                pdf.set_font("Arial", "", 11)
+                        except:
+                            pdf.set_font("Arial", "", 11)
+                        
+                        # Split text into lines and add them
+                        lines = translated_text.split('\n')
+                        for line in lines:
+                            if line.strip():
+                                # For Unicode support, use unicode encoding
+                                try:
+                                    if USE_FPDF2:
+                                        pdf.multi_cell(0, 5, line)
+                                    else:
+                                        # Try to handle Unicode
+                                        pdf.multi_cell(0, 5, line.encode('utf-8', 'replace').decode('utf-8', 'replace'))
+                                except:
+                                    # Last resort: replace unsupported characters
+                                    safe_line = line.encode('ascii', 'replace').decode('ascii')
+                                    pdf.multi_cell(0, 5, safe_line)
+                                pdf.ln(2)
+                
+                # Save to buffer
+                buffer = io.BytesIO()
+                pdf.output(buffer)
+                buffer.seek(0)
+                
+                safe_title = "".join(c for c in book_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                filename = f"{safe_title}_translated.pdf"
+                
+                return StreamingResponse(
+                    io.BytesIO(buffer.read()),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+                )
+            except ImportError:
+                raise HTTPException(
+                    status_code=500, 
+                    detail="PDF generation libraries not available. Please install one of: 'weasyprint' (recommended for Hindi), 'xhtml2pdf', or 'reportlab'. Install with: pip install weasyprint"
+                )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}\n{traceback.format_exc()}")
+
+
+class PWAPackageRequest(BaseModel):
+    book_id: int
+    base_url: Optional[str] = "https://blog.priorcoder.com/books"
+
+
+@app.post("/api/pwa/generate-package")
+async def generate_pwa_package(request: PWAPackageRequest):
+    """Generate a PWA package (HTML/JS/CSS/JSON) for reading translated books."""
+    try:
+        # Get book from database
+        books_db = BooksDBManager()
+        book = books_db.get_book(request.book_id)
+        
+        if not book:
+            raise HTTPException(status_code=404, detail=f"Book with ID {request.book_id} not found")
+        
+        # Get all translations
+        translations = books_db.get_all_translations(request.book_id)
+        
+        if not translations:
+            raise HTTPException(status_code=400, detail="No translations found for this book")
+        
+        # Filter and sort translations
+        translations_with_text = [
+            t for t in translations 
+            if t.get('translated_text') and t.get('translated_text').strip()
+        ]
+        
+        if not translations_with_text:
+            raise HTTPException(status_code=400, detail="No translated text found for this book")
+        
+        translations_with_text.sort(key=lambda x: x.get('page_number', 0))
+        
+        book_title = book.get('title', f"Book {request.book_id}")
+        book_author = book.get('author', '')
+        
+        # Create safe folder name
+        safe_folder_name = re.sub(r'[^a-zA-Z0-9_-]', '_', book_title).strip('_')[:50]
+        if not safe_folder_name:
+            safe_folder_name = f"book_{request.book_id}"
+        
+        # Prepare book data as JSON
+        book_data = {
+            "id": request.book_id,
+            "title": book_title,
+            "author": book_author,
+            "total_pages": len(translations_with_text),
+            "pages": []
+        }
+        
+        for trans in translations_with_text:
+            page_num = trans.get('page_number', 0)
+            translated_text = trans.get('translated_text', '').strip()
+            if translated_text:
+                book_data["pages"].append({
+                    "page_number": page_num,
+                    "content": translated_text
+                })
+        
+        # Create ZIP file in memory
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Add book data JSON
+            zip_file.writestr('book-data.json', json.dumps(book_data, ensure_ascii=False, indent=2))
+            
+            # Note: dashboard is now index.html in the root books folder, not in individual book folders
+            # Individual book folders only contain the reader (index.html)
+            
+            # Add index.html (reader)
+            index_html = generate_reader_html(book_title, book_author, request.book_id, safe_folder_name)
+            zip_file.writestr('index.html', index_html)
+            
+            # Add manifest.json
+            manifest_json = generate_manifest_json(book_title, safe_folder_name)
+            zip_file.writestr('manifest.json', manifest_json)
+            
+            # Add service-worker.js
+            service_worker_js = generate_service_worker_js()
+            zip_file.writestr('service-worker.js', service_worker_js)
+            
+            # Add styles.css
+            styles_css = generate_reader_css()
+            zip_file.writestr('styles.css', styles_css)
+            
+            # Add app.js
+            app_js = generate_app_js()
+            zip_file.writestr('app.js', app_js)
+            
+            # Add book-info.json for book metadata (used by dashboard to discover books)
+            book_info = {
+                "id": request.book_id,
+                "title": book_title,
+                "author": book_author,
+                "folder": safe_folder_name,
+                "total_pages": len(translations_with_text),
+                "created_at": datetime.now().isoformat()
+            }
+            zip_file.writestr('book-info.json', json.dumps(book_info, ensure_ascii=False, indent=2))
+            
+            # Add README.txt
+            readme_txt = f"""PWA Book Reader Package
+========================
+
+Book: {book_title}
+Author: {book_author}
+
+Installation:
+1. Extract this ZIP file to your web server
+2. Place it in: {request.base_url}/{safe_folder_name}/
+3. Access via: {request.base_url}/{safe_folder_name}/index.html
+
+Files:
+- index.html: Book reader (individual book)
+- manifest.json: PWA manifest
+- service-worker.js: Service worker for offline support
+- styles.css: Reader styling
+- app.js: Main application logic
+- book-data.json: Book content (page-wise)
+- book-info.json: Book metadata (for auto-discovery)
+
+The app will automatically:
+- Store book data in IndexedDB for fast reading
+- Save reading progress in browser storage
+- Work offline after first load
+- Show reading progress on dashboard
+- Auto-discover new books from server
+"""
+            zip_file.writestr('README.txt', readme_txt)
+        
+        buffer.seek(0)
+        filename = f"{safe_folder_name}_pwa.zip"
+        
+        return StreamingResponse(
+            io.BytesIO(buffer.read()),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Error generating PWA package: {str(e)}\n{traceback.format_exc()}")
+
+
+@app.get("/api/pwa/list-books")
+async def list_pwa_books(base_url: str = "https://blog.priorcoder.com/books"):
+    """List all available PWA books by scanning the books directory.
+    
+    This endpoint should be called from the dashboard to auto-discover books.
+    It returns books from the database that have been generated as PWA packages (have translations).
+    """
+    try:
+        books_db = BooksDBManager()
+        all_books = books_db.list_books()
+        
+        # Filter books that likely have PWA packages (have translations)
+        books_with_pwa = []
+        for book in all_books:
+            translations = books_db.get_all_translations(book['id'])
+            if translations and any(t.get('translated_text') for t in translations):
+                # Create safe folder name (same logic as in generate_pwa_package)
+                book_title = book.get('title', f"Book {book['id']}")
+                safe_folder_name = re.sub(r'[^a-zA-Z0-9_-]', '_', book_title).strip('_')[:50]
+                if not safe_folder_name:
+                    safe_folder_name = f"book_{book['id']}"
+                
+                books_with_pwa.append({
+                    "id": book['id'],
+                    "title": book_title,
+                    "author": book.get('author', ''),
+                    "folder": safe_folder_name,
+                    "url": f"{base_url}/{safe_folder_name}/",
+                    "total_pages": len([t for t in translations if t.get('translated_text')])
+                })
+        
+        return {
+            "success": True,
+            "books": books_with_pwa,
+            "base_url": base_url
+        }
+            
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Error listing books: {str(e)}\n{traceback.format_exc()}")
+
+
+@app.get("/api/pwa/generate-dashboard")
+async def generate_dashboard_file(base_url: str = "https://blog.priorcoder.com/books"):
+    """Generate a standalone index.html file for the books root folder.
+    
+    This dashboard will be placed at: {base_url}/index.html
+    It will automatically discover and list all available books by scanning
+    subdirectories for book-info.json files (no API server required).
+    
+    Also generates a books-list.json file with all known books (optional, for faster loading).
+    """
+    try:
+        dashboard_html = generate_dashboard_html(base_url)
+        
+        # Also generate a books-list.json file with all books (optional, for faster loading)
+        books_db = BooksDBManager()
+        all_books = books_db.list_books()
+        
+        books_with_info = []
+        for book in all_books:
+            translations = books_db.get_all_translations(book['id'])
+            translations_with_text = [
+                t for t in translations 
+                if t.get('translated_text') and t.get('translated_text').strip()
+            ]
+            
+            if translations_with_text:
+                book_title = book.get('title', f"Book {book['id']}")
+                safe_folder_name = re.sub(r'[^a-zA-Z0-9_-]', '_', book_title).strip('_')[:50]
+                if not safe_folder_name:
+                    safe_folder_name = f"book_{book['id']}"
+                
+                books_with_info.append({
+                    "id": book['id'],
+                    "title": book_title,
+                    "author": book.get('author', ''),
+                    "folder": safe_folder_name,
+                    "url": f"{base_url}/{safe_folder_name}/",
+                    "total_pages": len(translations_with_text)
+                })
+        
+        books_list_json = json.dumps({
+            "success": True,
+            "books": books_with_info,
+            "base_url": base_url,
+            "generated_at": datetime.now().isoformat()
+        }, ensure_ascii=False, indent=2)
+        
+        # Generate manifest.json for dashboard
+        dashboard_manifest_json = json.dumps({
+            "name": "Book Reader - Library",
+            "short_name": "Book Library",
+            "description": "Library dashboard for reading translated books",
+            "start_url": "./index.html",
+            "display": "standalone",
+            "background_color": "#667eea",
+            "theme_color": "#2c3e50",
+            "orientation": "portrait",
+            "icons": [
+                {
+                    "src": "icon-192.png",
+                    "sizes": "192x192",
+                    "type": "image/png"
+                },
+                {
+                    "src": "icon-512.png",
+                    "sizes": "512x512",
+                    "type": "image/png"
+                }
+            ]
+        }, indent=2)
+        
+        # Generate service worker for dashboard (dashboard-specific)
+        dashboard_service_worker = """const CACHE_NAME = 'book-library-dashboard-v1';
+const urlsToCache = [
+    './',
+    './index.html',
+    './manifest.json',
+    './books-list.json'
+];
+
+self.addEventListener('install', (event) => {
+    event.waitUntil(
+        caches.open(CACHE_NAME)
+            .then((cache) => cache.addAll(urlsToCache))
+    );
+});
+
+self.addEventListener('fetch', (event) => {
+    event.respondWith(
+        caches.match(event.request)
+            .then((response) => {
+                return response || fetch(event.request);
+            })
+    );
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil(
+        caches.keys().then((cacheNames) => {
+            return Promise.all(
+                cacheNames.map((cacheName) => {
+                    if (cacheName !== CACHE_NAME) {
+                        return caches.delete(cacheName);
+                    }
+                })
+            );
+        })
+    );
+});"""
+        
+        # Return all files as a ZIP
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr('index.html', dashboard_html)
+            zip_file.writestr('books-list.json', books_list_json)
+            zip_file.writestr('manifest.json', dashboard_manifest_json)
+            zip_file.writestr('service-worker.js', dashboard_service_worker)
+            zip_file.writestr('README.txt', f"""Dashboard Package
+==================
+
+Files:
+- index.html: Main dashboard (lists all books)
+- books-list.json: Pre-generated book list (optional, for faster loading)
+- manifest.json: PWA manifest file
+- service-worker.js: Service worker for offline support
+
+Installation:
+1. Extract all files to your web server
+2. Place them in: {base_url}/
+3. Access via: {base_url}/index.html
+
+The dashboard will:
+- First try to load books from books-list.json (if available)
+- Fall back to scanning subdirectories for book-info.json files
+- Work completely offline with static files only (no API server needed)
+
+To add new books:
+- Upload book folders to subdirectories
+- Each folder should contain book-info.json
+- Click "Refresh Books" on the dashboard to discover new books
+
+Note: You can optionally add icon-192.png and icon-512.png for PWA icons.
+""")
+        
+        buffer.seek(0)
+        return StreamingResponse(
+            io.BytesIO(buffer.read()),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="dashboard.zip"'}
+        )
+            
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Error generating dashboard: {str(e)}\n{traceback.format_exc()}")
+
+
+def generate_dashboard_html(base_url: str) -> str:
+    """Generate dashboard HTML that lists available books."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2c3e50">
+    <title>Book Reader - Dashboard</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .subtitle {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .books-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+        
+        .book-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+        }
+        
+        .book-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }
+        
+        .book-title {
+            font-size: 1.3em;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #2c3e50;
+        }
+        
+        .book-author {
+            color: #7f8c8d;
+            margin-bottom: 15px;
+            font-size: 0.9em;
+        }
+        
+        .book-progress {
+            margin-top: 15px;
+        }
+        
+        .progress-bar {
+            height: 6px;
+            background: #ecf0f1;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 5px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            transition: width 0.3s;
+        }
+        
+        .progress-text {
+            font-size: 0.85em;
+            color: #7f8c8d;
+        }
+        
+        .no-books {
+            text-align: center;
+            color: white;
+            padding: 40px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            margin-top: 30px;
+        }
+        
+        .loading {
+            text-align: center;
+            color: white;
+            padding: 40px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 My Library</h1>
+            <p class="subtitle">Continue reading your books</p>
+        </header>
+        
+        <div id="books-container" class="loading">
+            <p>Loading books...</p>
+        </div>
+        
+        <div style="text-align: center; margin-top: 30px;">
+            <button onclick="loadBooks()" style="padding: 10px 20px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; cursor: pointer; font-size: 0.9em;">
+                🔄 Refresh Books
+            </button>
+        </div>
+    </div>
+    
+    <script>
+        // Define base_url for this dashboard
+        const base_url = '{BASE_URL_PLACEHOLDER}';
+        
+        // List of known book folders (can be updated by scanning)
+        let knownBookFolders = [];
+        
+        // Auto-detect books from folder structure (static file discovery)
+        async function loadBooks() {
+            const container = document.getElementById('books-container');
+            container.innerHTML = '<p class="loading">Loading books...</p>';
+            
+            try {
+                // Method 1: Try to load from a pre-generated books-list.json file (if available)
+                let books = [];
+                try {
+                    const listResponse = await fetch('./books-list.json');
+                    if (listResponse.ok) {
+                        const listData = await listResponse.json();
+                        if (listData.books && Array.isArray(listData.books)) {
+                            books = listData.books;
+                            console.log('Loaded books from books-list.json');
+                        }
+                    }
+                } catch (e) {
+                    console.log('books-list.json not found, scanning folders...');
+                }
+                
+                // Method 2: If no books-list.json, scan subdirectories for book-info.json files
+                if (books.length === 0) {
+                    books = await scanForBooks();
+                }
+                
+                if (books.length === 0) {
+                    container.innerHTML = `
+                        <div class="no-books">
+                            <h2>No books found</h2>
+                            <p>Books will appear here once they are generated and uploaded to the server.</p>
+                            <p style="margin-top: 20px; font-size: 0.9em; opacity: 0.8;">
+                                Books should be placed in subdirectories under: ${base_url}/
+                            </p>
+                            <p style="margin-top: 10px; font-size: 0.85em; opacity: 0.7;">
+                                Each book should be in its own folder with a book-info.json file
+                            </p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Store known books in localStorage for offline access
+                localStorage.setItem('knownBooks', JSON.stringify(books));
+                
+                let html = '<div class="books-grid">';
+                
+                for (const book of books) {
+                    const progress = await getBookProgress(book.id);
+                    const progressPercent = progress.totalPages > 0 
+                        ? Math.round((progress.currentPage / progress.totalPages) * 100) 
+                        : 0;
+                    
+                    // Determine book URL - use folder if available, otherwise construct from base_url
+                    const bookUrl = book.url || `${base_url}/${book.folder}/`;
+                    
+                    html += `
+                        <div class="book-card" onclick="openBook('${book.folder}', '${bookUrl}')">
+                            <div class="book-title">${escapeHtml(book.title)}</div>
+                            <div class="book-author">${escapeHtml(book.author || 'Unknown Author')}</div>
+                            <div class="book-progress">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: ${progressPercent}%"></div>
+                                </div>
+                                <div class="progress-text">
+                                    Page ${progress.currentPage + 1} of ${progress.totalPages} (${progressPercent}%)
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                html += '</div>';
+                container.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Error loading books:', error);
+                
+                // Fallback: try to load from localStorage
+                const knownBooks = JSON.parse(localStorage.getItem('knownBooks') || '[]');
+                
+                if (knownBooks.length > 0) {
+                    let html = '<div class="books-grid">';
+                    for (const book of knownBooks) {
+                        const progress = await getBookProgress(book.id);
+                        // Use book.total_pages if progress doesn't have it
+                        const totalPages = progress.totalPages || book.total_pages || 0;
+                        const currentPage = progress.currentPage || 0;
+                        const progressPercent = totalPages > 0 
+                            ? Math.round((currentPage / totalPages) * 100) 
+                            : 0;
+                        
+                        const bookUrl = book.url || `${base_url}/${book.folder}/`;
+                        html += `
+                            <div class="book-card" onclick="openBook('${book.folder}', '${bookUrl}')">
+                                <div class="book-title">${escapeHtml(book.title)}</div>
+                                <div class="book-author">${escapeHtml(book.author || 'Unknown Author')}</div>
+                                <div class="book-progress">
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" style="width: ${progressPercent}%"></div>
+                                    </div>
+                                    <div class="progress-text">
+                                        Page ${currentPage + 1} of ${totalPages} (${progressPercent}%)
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    html += '</div>';
+                    container.innerHTML = html + '<p style="text-align: center; color: #ff9800; margin-top: 20px;">⚠️ Using cached data. Click Refresh to scan for new books.</p>';
+                } else {
+                    container.innerHTML = `
+                        <div class="no-books">
+                            <h2>Error loading books</h2>
+                            <p>${error.message}</p>
+                            <p style="margin-top: 20px; font-size: 0.9em; opacity: 0.8;">
+                                Make sure book folders are properly uploaded to the server.
+                            </p>
+                        </div>
+                    `;
+                }
+            }
+        }
+        
+        // Scan subdirectories for book-info.json files
+        async function scanForBooks() {
+            const books = [];
+            // Common book folder names to try (based on typical naming)
+            // We'll try to fetch book-info.json from likely folder names
+            const commonFolders = [
+                'the-atomic-habit',
+                'the-unconscious-mind',
+                'atomic-habits',
+                'book-1',
+                'book-2'
+            ];
+            
+            // Try to get folder list from a directory listing or known folders
+            // Since we can't list directories via HTTP, we'll try common patterns
+            // and also check localStorage for previously discovered folders
+            
+            const cachedFolders = JSON.parse(localStorage.getItem('discoveredBookFolders') || '[]');
+            const foldersToCheck = [...new Set([...commonFolders, ...cachedFolders])];
+            
+            for (const folder of foldersToCheck) {
+                try {
+                    const response = await fetch(`./${folder}/book-info.json`);
+                    if (response.ok) {
+                        const bookInfo = await response.json();
+                        books.push({
+                            id: bookInfo.id || books.length + 1,
+                            title: bookInfo.title || folder,
+                            author: bookInfo.author || '',
+                            folder: bookInfo.folder || folder,
+                            url: `${base_url}/${folder}/`,
+                            total_pages: bookInfo.total_pages || 0
+                        });
+                        // Cache this folder for future scans
+                        if (!cachedFolders.includes(folder)) {
+                            cachedFolders.push(folder);
+                            localStorage.setItem('discoveredBookFolders', JSON.stringify(cachedFolders));
+                        }
+                    }
+                } catch (e) {
+                    // Folder doesn't exist or no book-info.json, skip it
+                    continue;
+                }
+            }
+            
+            return books;
+        }
+        
+        async function getBookProgress(bookId) {
+            const db = await openDB();
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction(['progress'], 'readonly');
+                const store = transaction.objectStore('progress');
+                const request = store.get(bookId);
+                
+                request.onsuccess = () => {
+                    const progress = request.result;
+                    if (progress) {
+                        resolve({
+                            currentPage: progress.currentPage || 0,
+                            totalPages: progress.totalPages || 0
+                        });
+                    } else {
+                        resolve({ currentPage: 0, totalPages: 0 });
+                    }
+                };
+                
+                request.onerror = () => {
+                    resolve({ currentPage: 0, totalPages: 0 });
+                };
+            });
+        }
+        
+        function openBook(folder, bookUrl) {
+            // Use bookUrl if provided, otherwise construct from folder
+            if (bookUrl) {
+                window.location.href = bookUrl + 'index.html';
+            } else {
+                window.location.href = `${folder}/index.html`;
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        async function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open('BookReaderDB', 1);
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => resolve(request.result);
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains('books')) {
+                        db.createObjectStore('books', { keyPath: 'id' });
+                    }
+                    if (!db.objectStoreNames.contains('progress')) {
+                        db.createObjectStore('progress', { keyPath: 'bookId' });
+                    }
+                };
+            });
+        }
+        
+        // Load books on page load
+        loadBooks();
+        
+        // Register service worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('service-worker.js')
+                .then(reg => console.log('Service Worker registered'))
+                .catch(err => console.log('Service Worker registration failed:', err));
+        }
+    </script>
+</body>
+</html>""".replace('{BASE_URL_PLACEHOLDER}', base_url)
+
+
+def generate_reader_html(book_title: str, book_author: str, book_id: int, folder_name: str) -> str:
+    """Generate the main reader HTML."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2c3e50">
+    <title>{book_title} - Reader</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <button id="back-btn" class="icon-btn" title="Back to Library">←</button>
+            <div class="header-info">
+                <h1 id="book-title">{book_title}</h1>
+                <p id="book-author">{book_author}</p>
+            </div>
+            <button id="settings-btn" class="icon-btn" title="Settings">⚙️</button>
+        </header>
+        
+        <main id="reader">
+            <div id="content" class="content"></div>
+        </main>
+        
+        <nav class="reader-nav">
+            <button id="prev-btn" class="nav-btn">◀ Previous</button>
+            <div class="page-info">
+                <span id="page-indicator">Page 1 of 1</span>
+            </div>
+            <button id="next-btn" class="nav-btn">Next ▶</button>
+        </nav>
+        
+        <div id="settings-panel" class="settings-panel hidden">
+            <h3>Reading Settings</h3>
+            <div class="setting-item">
+                <label>Font Size</label>
+                <input type="range" id="font-size" min="14" max="24" value="18">
+                <span id="font-size-value">18px</span>
+            </div>
+            <div class="setting-item">
+                <label>Line Height</label>
+                <input type="range" id="line-height" min="1.4" max="2.2" step="0.1" value="1.8">
+                <span id="line-height-value">1.8</span>
+            </div>
+            <div class="setting-item">
+                <label>Theme</label>
+                <select id="theme-select">
+                    <option value="light">Light</option>
+                    <option value="sepia">Sepia</option>
+                    <option value="dark">Dark</option>
+                </select>
+            </div>
+            <button id="close-settings" class="close-btn">Close</button>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+    <script>
+        // Initialize app
+        const app = new BookReaderApp({{
+            bookId: {book_id},
+            folderName: '{folder_name}'
+        }});
+        app.init();
+    </script>
+</body>
+</html>"""
+
+
+def generate_manifest_json(book_title: str, folder_name: str) -> str:
+    """Generate PWA manifest."""
+    return json.dumps({
+        "name": f"{book_title} - Reader",
+        "short_name": book_title[:30],
+        "description": "E-reader for translated books",
+        "start_url": f"./{folder_name}/index.html",
+        "display": "standalone",
+        "background_color": "#ffffff",
+        "theme_color": "#2c3e50",
+        "orientation": "portrait",
+        "icons": [
+            {
+                "src": "icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png"
+            },
+            {
+                "src": "icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    }, indent=2)
+
+
+def generate_service_worker_js() -> str:
+    """Generate service worker for offline support."""
+    return """const CACHE_NAME = 'book-reader-v1';
+const urlsToCache = [
+    './',
+    './index.html',
+    './styles.css',
+    './app.js',
+    './manifest.json',
+    './book-data.json'
+];
+
+self.addEventListener('install', (event) => {
+    event.waitUntil(
+        caches.open(CACHE_NAME)
+            .then((cache) => cache.addAll(urlsToCache))
+    );
+});
+
+self.addEventListener('fetch', (event) => {
+    event.respondWith(
+        caches.match(event.request)
+            .then((response) => {
+                return response || fetch(event.request);
+            })
+    );
+});"""
+
+
+def generate_reader_css() -> str:
+    """Generate elegant e-reader CSS."""
+    return """/* E-Reader Styles - Elegant and Easy on the Eyes */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --bg-light: #fefefe;
+    --bg-sepia: #f4e8d0;
+    --bg-dark: #1a1a1a;
+    --text-light: #2c3e50;
+    --text-sepia: #3d2817;
+    --text-dark: #e0e0e0;
+    --accent: #667eea;
+}
+
+body {
+    font-family: 'Noto Sans Devanagari', 'Lohit Devanagari', 'DejaVu Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-light);
+    color: var(--text-light);
+    line-height: 1.8;
+    font-size: 18px;
+    transition: background 0.3s, color 0.3s;
+    overflow-x: hidden;
+}
+
+body.theme-sepia {
+    background: var(--bg-sepia);
+    color: var(--text-sepia);
+}
+
+body.theme-dark {
+    background: var(--bg-dark);
+    color: var(--text-dark);
+}
+
+#app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+header {
+    background: white;
+    padding: 15px 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+body.theme-dark header {
+    background: #2c2c2c;
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    font-size: 1.5em;
+    cursor: pointer;
+    padding: 5px 10px;
+    color: var(--accent);
+    transition: opacity 0.2s;
+}
+
+.icon-btn:hover {
+    opacity: 0.7;
+}
+
+.header-info {
+    flex: 1;
+    text-align: center;
+}
+
+.header-info h1 {
+    font-size: 1.2em;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+.header-info p {
+    font-size: 0.85em;
+    opacity: 0.7;
+}
+
+#reader {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px;
+    max-width: 800px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.content {
+    width: 100%;
+    max-width: 100%;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    font-size: 18px;
+    line-height: 1.8;
+    text-align: justify;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+    -moz-hyphens: auto;
+}
+
+.content p {
+    margin-bottom: 1.2em;
+    text-indent: 1.5em;
+}
+
+.content p:first-child {
+    text-indent: 0;
+}
+
+.reader-nav {
+    background: white;
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+    gap: 15px;
+}
+
+body.theme-dark .reader-nav {
+    background: #2c2c2c;
+}
+
+.nav-btn {
+    padding: 12px 24px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1em;
+    font-weight: 500;
+    transition: opacity 0.2s, transform 0.2s;
+    flex: 0 0 auto;
+}
+
+.nav-btn:hover:not(:disabled) {
+    opacity: 0.9;
+    transform: scale(1.05);
+}
+
+.nav-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.page-info {
+    flex: 1;
+    text-align: center;
+    font-size: 0.9em;
+    opacity: 0.8;
+}
+
+.settings-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 300px;
+    height: 100vh;
+    background: white;
+    box-shadow: -2px 0 8px rgba(0,0,0,0.2);
+    padding: 30px;
+    transform: translateX(0);
+    transition: transform 0.3s;
+    z-index: 200;
+    overflow-y: auto;
+}
+
+body.theme-dark .settings-panel {
+    background: #2c2c2c;
+}
+
+.settings-panel.hidden {
+    transform: translateX(100%);
+}
+
+.settings-panel h3 {
+    margin-bottom: 20px;
+    font-size: 1.3em;
+}
+
+.setting-item {
+    margin-bottom: 25px;
+}
+
+.setting-item label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+.setting-item input[type="range"] {
+    width: 100%;
+    margin-bottom: 5px;
+}
+
+.setting-item select {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1em;
+}
+
+.close-btn {
+    width: 100%;
+    padding: 12px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1em;
+    margin-top: 20px;
+}
+
+@media (max-width: 768px) {
+    .content {
+        font-size: 16px;
+        padding: 20px 10px;
+    }
+    
+    .reader-nav {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .nav-btn {
+        width: 100%;
+    }
+    
+    .settings-panel {
+        width: 100%;
+    }
+}"""
+
+
+def generate_app_js() -> str:
+    """Generate main application JavaScript."""
+    return """// Book Reader App
+class BookReaderApp {
+    constructor(config) {
+        this.bookId = config.bookId;
+        this.folderName = config.folderName;
+        this.currentPage = 0;
+        this.bookData = null;
+        this.db = null;
+    }
+    
+    async init() {
+        await this.initDB();
+        await this.loadBookData();
+        await this.loadProgress();
+        this.setupEventListeners();
+        this.loadPage(this.currentPage);
+        this.registerServiceWorker();
+    }
+    
+    async initDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open('BookReaderDB', 1);
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                this.db = request.result;
+                resolve();
+            };
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains('books')) {
+                    db.createObjectStore('books', { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains('progress')) {
+                    db.createObjectStore('progress', { keyPath: 'bookId' });
+                }
+            };
+        });
+    }
+    
+    async loadBookData() {
+        // Try to load from IndexedDB first
+        const transaction = this.db.transaction(['books'], 'readonly');
+        const store = transaction.objectStore('books');
+        const request = store.get(this.bookId);
+        
+        return new Promise((resolve, reject) => {
+            request.onsuccess = async () => {
+                if (request.result) {
+                    this.bookData = request.result;
+                    resolve();
+                } else {
+                    // Load from JSON file
+                    try {
+                        const response = await fetch('book-data.json');
+                        const data = await response.json();
+                        this.bookData = data;
+                        
+                        // Store in IndexedDB
+                        const writeTransaction = this.db.transaction(['books'], 'readwrite');
+                        const writeStore = writeTransaction.objectStore('books');
+                        writeStore.put(data);
+                        resolve();
+                    } catch (error) {
+                        reject(error);
+                    }
+                }
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+    
+    async loadProgress() {
+        const transaction = this.db.transaction(['progress'], 'readonly');
+        const store = transaction.objectStore('progress');
+        const request = store.get(this.bookId);
+        
+        request.onsuccess = () => {
+            if (request.result) {
+                this.currentPage = request.result.currentPage || 0;
+            }
+        };
+    }
+    
+    async saveProgress() {
+        const transaction = this.db.transaction(['progress'], 'readwrite');
+        const store = transaction.objectStore('progress');
+        store.put({
+            bookId: this.bookId,
+            currentPage: this.currentPage,
+            totalPages: this.bookData.pages.length,
+            lastRead: new Date().toISOString()
+        });
+    }
+    
+    loadPage(pageIndex) {
+        if (!this.bookData || pageIndex < 0 || pageIndex >= this.bookData.pages.length) {
+            return;
+        }
+        
+        const page = this.bookData.pages[pageIndex];
+        const content = document.getElementById('content');
+        
+        // Convert markdown-like formatting to HTML
+        let html = this.formatText(page.content);
+        content.innerHTML = html;
+        
+        // Update page indicator
+        const indicator = document.getElementById('page-indicator');
+        indicator.textContent = `Page ${pageIndex + 1} of ${this.bookData.pages.length}`;
+        
+        // Update navigation buttons
+        document.getElementById('prev-btn').disabled = pageIndex === 0;
+        document.getElementById('next-btn').disabled = pageIndex === this.bookData.pages.length - 1;
+        
+        // Save progress
+        this.currentPage = pageIndex;
+        this.saveProgress();
+        
+        // Scroll to top
+        window.scrollTo(0, 0);
+    }
+    
+    formatText(text) {
+        // Convert markdown to HTML
+        let html = text;
+        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        html = html.replace(/\\n/g, '<br>');
+        
+        // Wrap in paragraphs
+        const paragraphs = html.split('<br><br>');
+        return paragraphs.map(p => `<p>${p}</p>`).join('');
+    }
+    
+    setupEventListeners() {
+        document.getElementById('prev-btn').addEventListener('click', () => {
+            if (this.currentPage > 0) {
+                this.loadPage(this.currentPage - 1);
+            }
+        });
+        
+        document.getElementById('next-btn').addEventListener('click', () => {
+            if (this.currentPage < this.bookData.pages.length - 1) {
+                this.loadPage(this.currentPage + 1);
+            }
+        });
+        
+        document.getElementById('back-btn').addEventListener('click', () => {
+            window.location.href = '../index.html';
+        });
+        
+        document.getElementById('settings-btn').addEventListener('click', () => {
+            document.getElementById('settings-panel').classList.remove('hidden');
+        });
+        
+        document.getElementById('close-settings').addEventListener('click', () => {
+            document.getElementById('settings-panel').classList.add('hidden');
+        });
+        
+        // Font size
+        const fontSizeSlider = document.getElementById('font-size');
+        const fontSizeValue = document.getElementById('font-size-value');
+        fontSizeSlider.addEventListener('input', (e) => {
+            const size = e.target.value;
+            fontSizeValue.textContent = size + 'px';
+            document.getElementById('content').style.fontSize = size + 'px';
+            localStorage.setItem('fontSize', size);
+        });
+        const savedFontSize = localStorage.getItem('fontSize') || '18';
+        fontSizeSlider.value = savedFontSize;
+        fontSizeValue.textContent = savedFontSize + 'px';
+        document.getElementById('content').style.fontSize = savedFontSize + 'px';
+        
+        // Line height
+        const lineHeightSlider = document.getElementById('line-height');
+        const lineHeightValue = document.getElementById('line-height-value');
+        lineHeightSlider.addEventListener('input', (e) => {
+            const height = e.target.value;
+            lineHeightValue.textContent = height;
+            document.getElementById('content').style.lineHeight = height;
+            localStorage.setItem('lineHeight', height);
+        });
+        const savedLineHeight = localStorage.getItem('lineHeight') || '1.8';
+        lineHeightSlider.value = savedLineHeight;
+        lineHeightValue.textContent = savedLineHeight;
+        document.getElementById('content').style.lineHeight = savedLineHeight;
+        
+        // Theme
+        const themeSelect = document.getElementById('theme-select');
+        themeSelect.addEventListener('change', (e) => {
+            document.body.className = 'theme-' + e.target.value;
+            localStorage.setItem('theme', e.target.value);
+        });
+        const savedTheme = localStorage.getItem('theme') || 'light';
+        themeSelect.value = savedTheme;
+        document.body.className = 'theme-' + savedTheme;
+        
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowLeft' && this.currentPage > 0) {
+                this.loadPage(this.currentPage - 1);
+            } else if (e.key === 'ArrowRight' && this.currentPage < this.bookData.pages.length - 1) {
+                this.loadPage(this.currentPage + 1);
+            }
+        });
+    }
+    
+    registerServiceWorker() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('service-worker.js')
+                .then(reg => console.log('Service Worker registered'))
+                .catch(err => console.log('Service Worker registration failed:', err));
+        }
+    }
+}"""
+
+
 # Health check endpoint
 @app.get("/api/health")
 async def health_check():
@@ -911,6 +2797,10 @@ async def root():
             "health": {"GET": "/api/health"},
             "pdf_extract_text": {"POST": "/api/pdf/extract-text"},
             "pdf_save_translation": {"POST": "/api/pdf/save-translation"},
+            "pdf_generate_translated": {"POST": "/api/pdf/generate-translated-pdf"},
+            "pwa_generate_package": {"POST": "/api/pwa/generate-package"},
+            "pwa_list_books": {"GET": "/api/pwa/list-books"},
+            "pwa_generate_dashboard": {"GET": "/api/pwa/generate-dashboard"},
             "docs": {"GET": "/docs"}
         }
     }

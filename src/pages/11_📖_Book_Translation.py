@@ -471,6 +471,318 @@ st.title(f"📖 {book.get('title') or book.get('filename', 'Book Translation')}"
 if book.get('author'):
     st.caption(f"by {book['author']}")
 
+# Generate PDF, PWA Package, and Dashboard buttons at the top
+col_pdf1, col_pdf2, col_pdf3, col_pdf4 = st.columns([1.5, 1, 1, 1])
+with col_pdf2:
+    # Create Generate PDF button with JavaScript
+    generate_pdf_link_id = f"generate_pdf_link_{book_id}"
+    generate_pdf_func_name = f"generateTranslatedPDF_{book_id}"
+    
+    generate_pdf_html = f"""
+    <script>
+    (function() {{
+        function {generate_pdf_func_name}(e) {{
+            if (e) {{
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }}
+            
+            const pdfLink = document.getElementById('{generate_pdf_link_id}');
+            if (!pdfLink) {{
+                console.error('Generate PDF link not found');
+                return false;
+            }}
+            
+            console.log('Generating PDF for book_id={book_id}');
+            
+            // Show loading state
+            const originalText = pdfLink.textContent;
+            pdfLink.textContent = '⏳ Generating PDF...';
+            pdfLink.style.pointerEvents = 'none';
+            pdfLink.style.color = '#ff9800';
+            
+            // Call API endpoint to generate PDF
+            fetch('http://127.0.0.1:8000/api/pdf/generate-translated-pdf', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                }},
+                body: JSON.stringify({{
+                    book_id: {book_id}
+                }})
+            }})
+            .then(response => {{
+                console.log('PDF generation response status:', response.status);
+                if (!response.ok) {{
+                    throw new Error('HTTP error! status: ' + response.status);
+                }}
+                
+                // Get filename from Content-Disposition header or use default
+                const contentDisposition = response.headers.get('Content-Disposition');
+                let filename = 'translated_book.pdf';
+                if (contentDisposition) {{
+                    const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
+                    if (filenameMatch) {{
+                        filename = filenameMatch[1];
+                    }}
+                }}
+                
+                // Convert response to blob
+                return response.blob().then(blob => ({{
+                    blob: blob,
+                    filename: filename
+                }}));
+            }})
+            .then(({{blob, filename}}) => {{
+                console.log('PDF generated successfully, size:', blob.size);
+                
+                // Create download link
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                // Show success message
+                pdfLink.textContent = '✅ PDF Downloaded!';
+                pdfLink.style.color = '#28a745';
+                setTimeout(function() {{
+                    pdfLink.textContent = originalText;
+                    pdfLink.style.color = '#1f77b4';
+                    pdfLink.style.pointerEvents = 'auto';
+                }}, 3000);
+            }})
+            .catch(error => {{
+                console.error('PDF generation error:', error);
+                alert('Failed to generate PDF: ' + error.message + '. Please check if API server is running at http://127.0.0.1:8000');
+                pdfLink.textContent = originalText;
+                pdfLink.style.color = '#1f77b4';
+                pdfLink.style.pointerEvents = 'auto';
+            }});
+            
+            return false;
+        }}
+        
+        // Make function globally accessible
+        window.{generate_pdf_func_name} = {generate_pdf_func_name};
+    }})();
+    </script>
+    <a href="javascript:void(0)" 
+       id="{generate_pdf_link_id}" 
+       onclick="return {generate_pdf_func_name}(event);"
+       style="text-decoration: none; color: #1f77b4; cursor: pointer; font-size: 1em; display: inline-block; font-weight: bold; padding: 8px 16px; border: 2px solid #1f77b4; border-radius: 4px; background-color: #f0f8ff;">
+       📄 Generate PDF
+    </a>
+    """
+    from streamlit.components.v1 import html
+    html(generate_pdf_html, height=50)
+
+with col_pdf3:
+    # Create Generate PWA Package button
+    generate_pwa_link_id = f"generate_pwa_link_{book_id}"
+    generate_pwa_func_name = f"generatePWAPackage_{book_id}"
+    
+    generate_pwa_html = f"""
+    <script>
+    (function() {{
+        function {generate_pwa_func_name}(e) {{
+            if (e) {{
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }}
+            
+            const pwaLink = document.getElementById('{generate_pwa_link_id}');
+            if (!pwaLink) {{
+                console.error('Generate PWA link not found');
+                return false;
+            }}
+            
+            console.log('Generating PWA package for book_id={book_id}');
+            
+            // Show loading state
+            const originalText = pwaLink.textContent;
+            pwaLink.textContent = '⏳ Generating...';
+            pwaLink.style.pointerEvents = 'none';
+            pwaLink.style.color = '#ff9800';
+            
+            // Call API endpoint to generate PWA package
+            fetch('http://127.0.0.1:8000/api/pwa/generate-package', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                }},
+                body: JSON.stringify({{
+                    book_id: {book_id},
+                    base_url: 'https://blog.priorcoder.com/books'
+                }})
+            }})
+            .then(response => {{
+                console.log('PWA generation response status:', response.status);
+                if (!response.ok) {{
+                    throw new Error('HTTP error! status: ' + response.status);
+                }}
+                
+                // Get filename from Content-Disposition header
+                const contentDisposition = response.headers.get('Content-Disposition');
+                let filename = 'book_pwa.zip';
+                if (contentDisposition) {{
+                    const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
+                    if (filenameMatch) {{
+                        filename = filenameMatch[1];
+                    }}
+                }}
+                
+                // Convert response to blob
+                return response.blob().then(blob => ({{
+                    blob: blob,
+                    filename: filename
+                }}));
+            }})
+            .then(({{blob, filename}}) => {{
+                console.log('PWA package generated successfully, size:', blob.size);
+                
+                // Create download link
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                // Show success message
+                pwaLink.textContent = '✅ Downloaded!';
+                pwaLink.style.color = '#28a745';
+                setTimeout(function() {{
+                    pwaLink.textContent = originalText;
+                    pwaLink.style.color = '#1f77b4';
+                    pwaLink.style.pointerEvents = 'auto';
+                }}, 3000);
+            }})
+            .catch(error => {{
+                console.error('PWA generation error:', error);
+                alert('Failed to generate PWA package: ' + error.message + '. Please check if API server is running at http://127.0.0.1:8000');
+                pwaLink.textContent = originalText;
+                pwaLink.style.color = '#1f77b4';
+                pwaLink.style.pointerEvents = 'auto';
+            }});
+            
+            return false;
+        }}
+        
+        // Make function globally accessible
+        window.{generate_pwa_func_name} = {generate_pwa_func_name};
+    }})();
+    </script>
+    <a href="javascript:void(0)" 
+       id="{generate_pwa_link_id}" 
+       onclick="return {generate_pwa_func_name}(event);"
+       style="text-decoration: none; color: #1f77b4; cursor: pointer; font-size: 1em; display: inline-block; font-weight: bold; padding: 8px 16px; border: 2px solid #1f77b4; border-radius: 4px; background-color: #f0f8ff;">
+       📱 Generate PWA
+    </a>
+    """
+    from streamlit.components.v1 import html
+    html(generate_pwa_html, height=50)
+
+# Add a separate row for Dashboard button (since it's a one-time download)
+col_dash1, col_dash2 = st.columns([4, 1])
+with col_dash2:
+    # Create Generate Dashboard button
+    generate_dashboard_link_id = f"generate_dashboard_link"
+    generate_dashboard_func_name = f"generateDashboard"
+    
+    generate_dashboard_html = f"""
+    <script>
+    (function() {{
+        function {generate_dashboard_func_name}(e) {{
+            if (e) {{
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }}
+            
+            const dashboardLink = document.getElementById('{generate_dashboard_link_id}');
+            if (!dashboardLink) {{
+                console.error('Generate Dashboard link not found');
+                return false;
+            }}
+            
+            console.log('Generating Dashboard HTML');
+            
+            // Show loading state
+            const originalText = dashboardLink.textContent;
+            dashboardLink.textContent = '⏳ Generating...';
+            dashboardLink.style.pointerEvents = 'none';
+            dashboardLink.style.color = '#ff9800';
+            
+            // Call API endpoint to generate dashboard (returns ZIP file)
+            fetch('http://127.0.0.1:8000/api/pwa/generate-dashboard?base_url=' + encodeURIComponent('https://blog.priorcoder.com/books'), {{
+                method: 'GET',
+                headers: {{
+                    'Accept': 'application/zip',
+                }}
+            }})
+            .then(response => {{
+                console.log('Dashboard generation response status:', response.status);
+                console.log('Content-Type:', response.headers.get('Content-Type'));
+                if (!response.ok) {{
+                    throw new Error('HTTP error! status: ' + response.status);
+                }}
+                return response.blob();
+            }})
+            .then(blob => {{
+                console.log('Dashboard ZIP generated successfully, size:', blob.size, 'bytes');
+                
+                // Create download link for ZIP file
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'dashboard.zip';
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                // Show success message
+                dashboardLink.textContent = '✅ Downloaded!';
+                dashboardLink.style.color = '#28a745';
+                setTimeout(function() {{
+                    dashboardLink.textContent = originalText;
+                    dashboardLink.style.color = '#1f77b4';
+                    dashboardLink.style.pointerEvents = 'auto';
+                }}, 3000);
+            }})
+            .catch(error => {{
+                console.error('Dashboard generation error:', error);
+                alert('Failed to generate dashboard: ' + error.message + '. Please check if API server is running at http://127.0.0.1:8000');
+                dashboardLink.textContent = originalText;
+                dashboardLink.style.color = '#1f77b4';
+                dashboardLink.style.pointerEvents = 'auto';
+            }});
+            
+            return false;
+        }}
+        
+        // Make function globally accessible
+        window.{generate_dashboard_func_name} = {generate_dashboard_func_name};
+    }})();
+    </script>
+    <a href="javascript:void(0)" 
+       id="{generate_dashboard_link_id}" 
+       onclick="return {generate_dashboard_func_name}(event);"
+       style="text-decoration: none; color: #1f77b4; cursor: pointer; font-size: 0.9em; display: inline-block; font-weight: bold; padding: 8px 16px; border: 2px solid #1f77b4; border-radius: 4px; background-color: #f0f8ff;">
+       📊 Get Dashboard
+    </a>
+    """
+    from streamlit.components.v1 import html
+    html(generate_dashboard_html, height=50)
+
 # Navigation controls - placed early for quick response
 col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 2, 1, 1])
 
