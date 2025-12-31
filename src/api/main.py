@@ -1908,9 +1908,12 @@ def generate_dashboard_html(base_url: str) -> str:
             <p>Loading books...</p>
         </div>
         
-        <div style="text-align: center; margin-top: 30px;">
+        <div style="text-align: center; margin-top: 30px; display: flex; gap: 10px; justify-content: center;">
             <button onclick="loadBooks()" style="padding: 10px 20px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; cursor: pointer; font-size: 0.9em;">
                 🔄 Refresh Books
+            </button>
+            <button onclick="clearCache()" style="padding: 10px 20px; background: rgba(255,152,0,0.3); color: white; border: 1px solid rgba(255,152,0,0.5); border-radius: 8px; cursor: pointer; font-size: 0.9em;">
+                🗑️ Clear Cache
             </button>
         </div>
     </div>
@@ -1928,24 +1931,24 @@ def generate_dashboard_html(base_url: str) -> str:
             container.innerHTML = '<p class="loading">Loading books...</p>';
             
             try {
-                // Method 1: Try to load from a pre-generated books-list.json file (if available)
-                let books = [];
-                try {
-                    const listResponse = await fetch('./books-list.json');
-                    if (listResponse.ok) {
-                        const listData = await listResponse.json();
-                        if (listData.books && Array.isArray(listData.books)) {
-                            books = listData.books;
-                            console.log('Loaded books from books-list.json');
-                        }
-                    }
-                } catch (e) {
-                    console.log('books-list.json not found, scanning folders...');
-                }
+                // Always scan folders for fresh book-info.json files first
+                // This ensures we get the latest page counts even after updates
+                let books = await scanForBooks();
                 
-                // Method 2: If no books-list.json, scan subdirectories for book-info.json files
+                // If no books found from scanning, try books-list.json as fallback
                 if (books.length === 0) {
-                    books = await scanForBooks();
+                    try {
+                        const listResponse = await fetch('./books-list.json');
+                        if (listResponse.ok) {
+                            const listData = await listResponse.json();
+                            if (listData.books && Array.isArray(listData.books)) {
+                                books = listData.books;
+                                console.log('Loaded books from books-list.json (fallback)');
+                            }
+                        }
+                    } catch (e) {
+                        console.log('books-list.json not found');
+                    }
                 }
                 
                 if (books.length === 0) {
@@ -1971,8 +1974,11 @@ def generate_dashboard_html(base_url: str) -> str:
                 
                 for (const book of books) {
                     const progress = await getBookProgress(book.id);
-                    const progressPercent = progress.totalPages > 0 
-                        ? Math.round((progress.currentPage / progress.totalPages) * 100) 
+                    // Use fresh total_pages from book-info.json, fallback to progress.totalPages
+                    const totalPages = book.total_pages || progress.totalPages || 0;
+                    const currentPage = progress.currentPage || 0;
+                    const progressPercent = totalPages > 0 
+                        ? Math.round((currentPage / totalPages) * 100) 
                         : 0;
                     
                     // Determine book URL - use folder if available, otherwise construct from base_url
@@ -1987,7 +1993,7 @@ def generate_dashboard_html(base_url: str) -> str:
                                     <div class="progress-fill" style="width: ${progressPercent}%"></div>
                                 </div>
                                 <div class="progress-text">
-                                    Page ${progress.currentPage + 1} of ${progress.totalPages} (${progressPercent}%)
+                                    Page ${currentPage + 1} of ${totalPages} (${progressPercent}%)
                                 </div>
                             </div>
                         </div>
@@ -2064,11 +2070,31 @@ def generate_dashboard_html(base_url: str) -> str:
             // and also check localStorage for previously discovered folders
             
             const cachedFolders = JSON.parse(localStorage.getItem('discoveredBookFolders') || '[]');
-            const foldersToCheck = [...new Set([...commonFolders, ...cachedFolders])];
+            let foldersToCheck = [...new Set([...commonFolders, ...cachedFolders])];
             
+            // Also try to load from books-list.json to discover folder names
+            try {
+                const listResponse = await fetch('./books-list.json?t=' + Date.now());
+                if (listResponse.ok) {
+                    const listData = await listResponse.json();
+                    if (listData.books && Array.isArray(listData.books)) {
+                        // Extract folder names from books-list.json
+                        listData.books.forEach(book => {
+                            if (book.folder && !foldersToCheck.includes(book.folder)) {
+                                foldersToCheck.push(book.folder);
+                            }
+                        });
+                    }
+                }
+            } catch (e) {
+                // Ignore if books-list.json doesn't exist
+            }
+            
+            // Fetch fresh book-info.json from each folder with cache-busting
             for (const folder of foldersToCheck) {
                 try {
-                    const response = await fetch(`./${folder}/book-info.json`);
+                    // Add cache-busting parameter to ensure fresh data
+                    const response = await fetch(`./${folder}/book-info.json?t=${Date.now()}`);
                     if (response.ok) {
                         const bookInfo = await response.json();
                         books.push({
@@ -2151,6 +2177,62 @@ def generate_dashboard_html(base_url: str) -> str:
             });
         }
         
+        async function clearCache() {
+            if (!confirm('Clear all cached data?\\n\\nThis will:\\n- Clear cached book data\\n- Clear localStorage cache\\n- Clear service worker cache\\n\\nYour reading progress will be preserved.')) {
+                return;
+            }
+            
+            try {
+                // Clear IndexedDB 'books' store (but keep 'progress' store)
+                const db = await openDB();
+                const transaction = db.transaction(['books'], 'readwrite');
+                const store = transaction.objectStore('books');
+                const clearRequest = store.clear();
+                
+                await new Promise((resolve, reject) => {
+                    clearRequest.onsuccess = () => resolve();
+                    clearRequest.onerror = () => reject(clearRequest.error);
+                });
+                
+                console.log('Cleared IndexedDB books store');
+                
+                // Clear localStorage cache (except discoveredBookFolders for convenience)
+                const discoveredFolders = localStorage.getItem('discoveredBookFolders');
+                localStorage.clear();
+                if (discoveredFolders) {
+                    localStorage.setItem('discoveredBookFolders', discoveredFolders);
+                }
+                console.log('Cleared localStorage cache');
+                
+                // Clear service worker cache
+                if ('serviceWorker' in navigator && 'caches' in window) {
+                    const cacheNames = await caches.keys();
+                    await Promise.all(
+                        cacheNames.map(cacheName => caches.delete(cacheName))
+                    );
+                    console.log('Cleared service worker cache');
+                }
+                
+                // Unregister service worker to force fresh registration
+                if ('serviceWorker' in navigator) {
+                    const registrations = await navigator.serviceWorker.getRegistrations();
+                    await Promise.all(
+                        registrations.map(registration => registration.unregister())
+                    );
+                    console.log('Unregistered service workers');
+                }
+                
+                alert('Cache cleared successfully!\\n\\nPage will reload to fetch fresh data.');
+                
+                // Reload the page to fetch fresh data
+                window.location.reload(true);
+                
+            } catch (error) {
+                console.error('Error clearing cache:', error);
+                alert('Error clearing cache: ' + error.message);
+            }
+        }
+        
         // Load books on page load
         loadBooks();
         
@@ -2219,6 +2301,12 @@ def generate_reader_html(book_title: str, book_author: str, book_id: int, folder
                     <option value="sepia">Sepia</option>
                     <option value="dark">Dark</option>
                 </select>
+            </div>
+            <div class="setting-item" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(0,0,0,0.1);">
+                <button id="clear-cache-btn" class="close-btn" style="background: #ff9800; color: white; width: 100%;">🗑️ Clear Cache</button>
+                <p style="font-size: 0.85em; color: #666; margin-top: 10px; text-align: center;">
+                    Clears cached book data but preserves reading progress
+                </p>
             </div>
             <button id="close-settings" class="close-btn">Close</button>
         </div>
@@ -2586,47 +2674,79 @@ class BookReaderApp {
     }
     
     async loadBookData() {
-        // Try to load from IndexedDB first
-        const transaction = this.db.transaction(['books'], 'readonly');
-        const store = transaction.objectStore('books');
-        const request = store.get(this.bookId);
-        
-        return new Promise((resolve, reject) => {
-            request.onsuccess = async () => {
-                if (request.result) {
-                    this.bookData = request.result;
-                    resolve();
-                } else {
-                    // Load from JSON file
-                    try {
-                        const response = await fetch('book-data.json');
-                        const data = await response.json();
-                        this.bookData = data;
-                        
-                        // Store in IndexedDB
-                        const writeTransaction = this.db.transaction(['books'], 'readwrite');
-                        const writeStore = writeTransaction.objectStore('books');
-                        writeStore.put(data);
-                        resolve();
-                    } catch (error) {
-                        reject(error);
-                    }
-                }
+        // Always fetch fresh book-data.json from server to get latest pages
+        // Use cache-busting to ensure we get the latest version
+        try {
+            const response = await fetch(`book-data.json?t=${Date.now()}`);
+            if (!response.ok) {
+                throw new Error('Failed to fetch book-data.json');
+            }
+            const data = await response.json();
+            this.bookData = data;
+            
+            // Update IndexedDB with fresh data
+            const writeTransaction = this.db.transaction(['books'], 'readwrite');
+            const writeStore = writeTransaction.objectStore('books');
+            writeStore.put(data);
+            
+            // Update progress totalPages to match current book data
+            const totalPages = data.pages ? data.pages.length : 0;
+            const progressTransaction = this.db.transaction(['progress'], 'readwrite');
+            const progressStore = progressTransaction.objectStore('progress');
+            const progressRequest = progressStore.get(this.bookId);
+            
+            progressRequest.onsuccess = () => {
+                const existingProgress = progressRequest.result || { bookId: this.bookId, currentPage: 0 };
+                // Update totalPages to match current book data
+                const updatedProgress = {
+                    ...existingProgress,
+                    totalPages: totalPages
+                };
+                progressStore.put(updatedProgress);
             };
-            request.onerror = () => reject(request.error);
-        });
+        } catch (error) {
+            // Fallback: try to load from IndexedDB if fetch fails
+            console.warn('Failed to fetch fresh book-data.json, using cached version:', error);
+            const transaction = this.db.transaction(['books'], 'readonly');
+            const store = transaction.objectStore('books');
+            const request = store.get(this.bookId);
+            
+            return new Promise((resolve, reject) => {
+                request.onsuccess = () => {
+                    if (request.result) {
+                        this.bookData = request.result;
+                        resolve();
+                    } else {
+                        reject(new Error('No book data available'));
+                    }
+                };
+                request.onerror = () => reject(request.error);
+            });
+        }
     }
     
     async loadProgress() {
-        const transaction = this.db.transaction(['progress'], 'readonly');
-        const store = transaction.objectStore('progress');
-        const request = store.get(this.bookId);
-        
-        request.onsuccess = () => {
-            if (request.result) {
-                this.currentPage = request.result.currentPage || 0;
-            }
-        };
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['progress'], 'readonly');
+            const store = transaction.objectStore('progress');
+            const request = store.get(this.bookId);
+            
+            request.onsuccess = () => {
+                if (request.result) {
+                    this.currentPage = request.result.currentPage || 0;
+                } else {
+                    // No progress found, start from page 0
+                    this.currentPage = 0;
+                }
+                resolve();
+            };
+            
+            request.onerror = () => {
+                // On error, default to page 0
+                this.currentPage = 0;
+                reject(request.error);
+            };
+        });
     }
     
     async saveProgress() {
@@ -2638,6 +2758,63 @@ class BookReaderApp {
             totalPages: this.bookData.pages.length,
             lastRead: new Date().toISOString()
         });
+    }
+    
+    async clearCache() {
+        if (!confirm('Clear all cached data?\\n\\nThis will:\\n- Clear cached book data\\n- Clear localStorage cache\\n- Clear service worker cache\\n\\nYour reading progress will be preserved.')) {
+            return;
+        }
+        
+        try {
+            // Clear IndexedDB 'books' store (but keep 'progress' store)
+            const transaction = this.db.transaction(['books'], 'readwrite');
+            const store = transaction.objectStore('books');
+            const clearRequest = store.clear();
+            
+            await new Promise((resolve, reject) => {
+                clearRequest.onsuccess = () => resolve();
+                clearRequest.onerror = () => reject(clearRequest.error);
+            });
+            
+            console.log('Cleared IndexedDB books store');
+            
+            // Clear localStorage cache (except reading preferences)
+            const fontSize = localStorage.getItem('fontSize');
+            const lineHeight = localStorage.getItem('lineHeight');
+            const theme = localStorage.getItem('theme');
+            localStorage.clear();
+            if (fontSize) localStorage.setItem('fontSize', fontSize);
+            if (lineHeight) localStorage.setItem('lineHeight', lineHeight);
+            if (theme) localStorage.setItem('theme', theme);
+            console.log('Cleared localStorage cache');
+            
+            // Clear service worker cache
+            if ('caches' in window) {
+                const cacheNames = await caches.keys();
+                await Promise.all(
+                    cacheNames.map(cacheName => caches.delete(cacheName))
+                );
+                console.log('Cleared service worker cache');
+            }
+            
+            // Unregister service worker to force fresh registration
+            if ('serviceWorker' in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                await Promise.all(
+                    registrations.map(registration => registration.unregister())
+                );
+                console.log('Unregistered service workers');
+            }
+            
+            alert('Cache cleared successfully!\\n\\nPage will reload to fetch fresh data.');
+            
+            // Reload the page to fetch fresh data
+            window.location.reload(true);
+            
+        } catch (error) {
+            console.error('Error clearing cache:', error);
+            alert('Error clearing cache: ' + error.message);
+        }
     }
     
     loadPage(pageIndex) {
@@ -2703,6 +2880,10 @@ class BookReaderApp {
         
         document.getElementById('close-settings').addEventListener('click', () => {
             document.getElementById('settings-panel').classList.add('hidden');
+        });
+        
+        document.getElementById('clear-cache-btn').addEventListener('click', () => {
+            app.clearCache();
         });
         
         // Font size
