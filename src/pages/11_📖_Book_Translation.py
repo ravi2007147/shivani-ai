@@ -15,6 +15,7 @@ from typing import Optional, List
 import os
 import requests
 import json
+import time
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -25,6 +26,10 @@ from src.utils.books_db import BooksDBManager
 from src.utils.pdf_parser import extract_text_from_pdf_stream
 from src.utils import start_api_server, is_api_server_running
 from src.utils import start_api_server, is_api_server_running, get_api_server_url
+from langchain_ollama import OllamaLLM
+from src.config import DEFAULT_OLLAMA_BASE_URL
+from langchain_ollama import OllamaLLM
+from src.config import DEFAULT_OLLAMA_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -471,8 +476,95 @@ st.title(f"📖 {book.get('title') or book.get('filename', 'Book Translation')}"
 if book.get('author'):
     st.caption(f"by {book['author']}")
 
-# Generate PDF, PWA Package, and Dashboard buttons at the top
-col_pdf1, col_pdf2, col_pdf3, col_pdf4 = st.columns([1.5, 1, 1, 1])
+# Auto-translation helper functions
+def translate_text_with_ollama(llm: OllamaLLM, text: str) -> str:
+    """Translate English text to Hindi using Ollama LLM."""
+    translation_prompt = f"""You are a professional translator with native-level proficiency in both English and Hindi. Your expertise includes understanding cultural nuances, idiomatic expressions, and context-dependent meanings.
+
+TASK: Translate the following English text into natural, fluent Hindi that reads as if it were originally written in Hindi.
+
+TRANSLATION GUIDELINES:
+1. **Context Understanding**: Analyze the full context, not individual words. Understand the intended meaning, tone, and purpose.
+2. **Natural Flow**: The translation should flow naturally in Hindi, using appropriate sentence structures and word order.
+3. **Cultural Adaptation**: Adapt cultural references, idioms, and expressions to be meaningful in Hindi context.
+4. **Vocabulary Selection**: Choose the most appropriate Hindi words that convey the exact meaning and register (formal/informal).
+5. **Grammar & Syntax**: Use correct Hindi grammar, including proper use of matras (diacritics), verb conjugations, and case markers.
+6. **Technical Terms**: For technical terms, use standard Hindi translations when available, or transliterate appropriately.
+7. **Proper Nouns**: Keep names, places, and brand names as-is or use common Hindi transliterations.
+8. **Tone Preservation**: Maintain the original tone (formal, casual, technical, narrative, etc.).
+
+ORIGINAL ENGLISH TEXT:
+{text}
+
+TRANSLATION REQUIREMENTS:
+- Output ONLY the Hindi translation
+- No explanations, notes, or additional text
+- Preserve paragraph breaks and formatting
+- Use proper Devanagari script
+
+Hindi Translation:"""
+    
+    try:
+        translation = llm.invoke(translation_prompt).strip()
+        prefixes_to_remove = [
+            "Hindi translation:", "Translation:", "Here is the translation:",
+            "The Hindi translation is:", "हिंदी अनुवाद:", "अनुवाद:",
+            "Hindi Translation:", "TRANSLATION:"
+        ]
+        for prefix in prefixes_to_remove:
+            if translation.lower().startswith(prefix.lower()):
+                translation = translation[len(prefix):].strip()
+        return translation
+    except Exception as e:
+        logger.error(f"Translation error: {e}", exc_info=True)
+        raise
+
+
+def translate_with_refinement(llm: OllamaLLM, text: str) -> str:
+    """Translate with two-step process: initial translation + refinement."""
+    initial_prompt = f"""Translate the following English text to Hindi. Focus on accuracy and meaning.
+
+English text:
+{text}
+
+Provide the Hindi translation:"""
+    
+    try:
+        initial_translation = llm.invoke(initial_prompt).strip()
+        prefixes_to_remove = ["Hindi translation:", "Translation:", "Here is the translation:", "हिंदी अनुवाद:", "अनुवाद:"]
+        for prefix in prefixes_to_remove:
+            if initial_translation.lower().startswith(prefix.lower()):
+                initial_translation = initial_translation[len(prefix):].strip()
+        
+        refinement_prompt = f"""You are refining a Hindi translation to make it more natural, fluent, and accurate.
+
+ORIGINAL ENGLISH TEXT:
+{text}
+
+CURRENT HINDI TRANSLATION:
+{initial_translation}
+
+TASK: Refine this translation to:
+1. Make it sound more natural and fluent in Hindi
+2. Improve word choice and expressions
+3. Ensure proper grammar and sentence structure
+4. Enhance readability and flow
+5. Fix any awkward phrasings or literal translations
+
+Output ONLY the refined Hindi translation, no explanations:"""
+        
+        refined_translation = llm.invoke(refinement_prompt).strip()
+        for prefix in prefixes_to_remove:
+            if refined_translation.lower().startswith(prefix.lower()):
+                refined_translation = refined_translation[len(prefix):].strip()
+        return refined_translation
+    except Exception as e:
+        logger.error(f"Refined translation error: {e}", exc_info=True)
+        return translate_text_with_ollama(llm, text)
+
+
+# Generate PDF, PWA Package, Dashboard, and Auto Translate buttons at the top
+col_pdf1, col_pdf2, col_pdf3, col_pdf4, col_pdf5 = st.columns([1.2, 1, 1, 1, 1.2])
 with col_pdf2:
     # Create Generate PDF button with JavaScript
     generate_pdf_link_id = f"generate_pdf_link_{book_id}"
@@ -690,8 +782,8 @@ with col_pdf3:
     from streamlit.components.v1 import html
     html(generate_pwa_html, height=50)
 
-# Add a separate row for Dashboard button (since it's a one-time download)
-col_dash1, col_dash2 = st.columns([4, 1])
+# Add a separate row for Dashboard and Auto Translate buttons
+col_dash1, col_dash2, col_dash3 = st.columns([3, 1, 1])
 with col_dash2:
     # Create Generate Dashboard button
     generate_dashboard_link_id = f"generate_dashboard_link"
@@ -782,6 +874,604 @@ with col_dash2:
     """
     from streamlit.components.v1 import html
     html(generate_dashboard_html, height=50)
+
+# Auto Translate button (AJAX-based, no page refresh)
+col_auto1, col_auto2 = st.columns([4, 1])
+with col_auto2:
+    auto_translate_link_id = f"auto_translate_link_{book_id}"
+    auto_translate_func_name = f"startAutoTranslate_{book_id}"
+    
+    auto_translate_html = f"""
+    <div>
+    <script>
+    (function() {{
+        let isPolling = false;
+        let pollInterval = null;
+        let jobId = null;
+        const bookId = {book_id};
+        const totalPages = {total_pages};
+        const API_BASE = 'http://127.0.0.1:8000';
+        
+        // Helper function to get element (works in iframe or main window)
+        function getElement(id) {{
+            let el = document.getElementById(id);
+            if (el) return el;
+            if (window.parent && window.parent !== window) {{
+                try {{
+                    el = window.parent.document.getElementById(id);
+                    if (el) return el;
+                }} catch (e) {{
+                    console.warn('Cannot access parent document:', e);
+                }}
+            }}
+            return null;
+        }}
+        
+        // Function to close progress dialog
+        function closeProgressDialog() {{
+            const el = getElement('auto_translate_progress');
+            if (el) {{
+                el.style.display = 'none';
+            }}
+        }}
+        
+        // Function to resume a stuck translation job
+        function resumeTranslationJob(jobIdParam) {{
+            console.log('🔄 Resuming translation job:', jobIdParam);
+            const resumeBtn = getElement('auto_translate_resume_btn');
+            if (resumeBtn) {{
+                resumeBtn.textContent = '⏳ Resuming...';
+                resumeBtn.style.pointerEvents = 'none';
+            }}
+            
+            fetch(API_BASE + '/api/pdf/resume-translation-job/' + jobIdParam, {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json'
+                }}
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    throw new Error('HTTP error! status: ' + response.status);
+                }}
+                return response.json();
+            }})
+            .then(data => {{
+                console.log('📥 Resume response:', data);
+                if (data.success) {{
+                    console.log('✅ Job resumed successfully');
+                    jobId = jobIdParam;
+                    isPolling = true;
+                    // Start polling immediately
+                    pollJobProgress();
+                }} else {{
+                    console.error('❌ Failed to resume job:', data.message || data.detail);
+                    if (resumeBtn) {{
+                        resumeBtn.textContent = '❌ Failed';
+                        resumeBtn.style.background = 'rgba(244,67,54,0.8)';
+                        resumeBtn.style.pointerEvents = 'auto';
+                    }}
+                }}
+            }})
+            .catch(error => {{
+                console.error('❌ Error resuming job:', error);
+                if (resumeBtn) {{
+                    resumeBtn.textContent = '❌ Error';
+                    resumeBtn.style.background = 'rgba(244,67,54,0.8)';
+                    resumeBtn.style.pointerEvents = 'auto';
+                }}
+            }});
+        }}
+        
+        // Function to restart a translation job from the beginning
+        function restartTranslationJob(jobIdParam) {{
+            console.log('🔄 Restarting translation job:', jobIdParam);
+            const restartBtn = getElement('auto_translate_restart_btn');
+            if (restartBtn) {{
+                restartBtn.textContent = '⏳ Restarting...';
+                restartBtn.style.pointerEvents = 'none';
+            }}
+            
+            fetch(API_BASE + '/api/pdf/restart-translation-job/' + jobIdParam, {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json'
+                }}
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    throw new Error('HTTP error! status: ' + response.status);
+                }}
+                return response.json();
+            }})
+            .then(data => {{
+                console.log('📥 Restart response:', data);
+                if (data.success) {{
+                    console.log('✅ Job restarted successfully, new job ID:', data.new_job_id);
+                    jobId = data.new_job_id;
+                    isPolling = true;
+                    // Refresh the page to show the new job
+                    setTimeout(() => window.location.reload(), 1000);
+                }} else {{
+                    console.error('❌ Failed to restart job:', data.message || data.detail);
+                    if (restartBtn) {{
+                        restartBtn.textContent = '❌ Failed';
+                        restartBtn.style.background = 'rgba(244,67,54,0.8)';
+                        restartBtn.style.pointerEvents = 'auto';
+                    }}
+                }}
+            }})
+            .catch(error => {{
+                console.error('❌ Error restarting job:', error);
+                if (restartBtn) {{
+                    restartBtn.textContent = '❌ Error';
+                    restartBtn.style.background = 'rgba(244,67,54,0.8)';
+                    restartBtn.style.pointerEvents = 'auto';
+                }}
+            }});
+        }}
+        
+        // Make resume and restart functions globally accessible (both in current scope and window)
+        window.resumeTranslationJob = resumeTranslationJob;
+        window.restartTranslationJob = restartTranslationJob;
+        // Also make it accessible in parent window if in iframe
+        if (window.parent && window.parent !== window) {{
+            try {{
+                window.parent.resumeTranslationJob = resumeTranslationJob;
+                window.parent.restartTranslationJob = restartTranslationJob;
+            }} catch (e) {{
+                console.warn('Cannot set functions in parent window:', e);
+            }}
+        }}
+        
+        // Create or get progress container
+        function getOrCreateProgressContainer() {{
+            let progressContainer = getElement('auto_translate_progress');
+            if (!progressContainer) {{
+                progressContainer = document.createElement('div');
+                progressContainer.id = 'auto_translate_progress';
+                progressContainer.style.cssText = 'position: fixed; top: 0; left: 50%; transform: translateX(-50%); width: 80%; max-width: 800px; margin: 20px 0; padding: 25px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 15px; box-shadow: 0 6px 12px rgba(0,0,0,0.3); color: white; z-index: 9999; display: block;';
+                
+                // Try to insert in parent window if in iframe
+                if (window.parent && window.parent !== window) {{
+                    try {{
+                        window.parent.document.body.appendChild(progressContainer);
+                        console.log('✅ Progress bar created in parent window');
+                    }} catch (e) {{
+                        document.body.appendChild(progressContainer);
+                        console.log('✅ Progress bar created in current window (fallback)');
+                    }}
+                }} else {{
+                    document.body.appendChild(progressContainer);
+                    console.log('✅ Progress bar created in current window');
+                }}
+            }} else {{
+                // Ensure it's visible
+                progressContainer.style.display = 'block';
+            }}
+            return progressContainer;
+        }}
+        
+        // Update progress display
+        function updateProgress(progress) {{
+            const container = getOrCreateProgressContainer();
+            // Ensure container is visible
+            container.style.display = 'block';
+            const completed = progress.completed_pages || 0;
+            const failed = progress.failed_pages || 0;
+            const total = progress.total_pages || totalPages;
+            const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+            const avgTime = progress.avg_time_per_page || 0;
+            const estTime = progress.estimated_time_remaining || 0;
+            
+            let statusText = '⏳ Starting...';
+            if (progress.status === 'running' || progress.status === 'pending') statusText = '🔄 Translation in progress...';
+            else if (progress.status === 'stuck') statusText = '⚠️ Translation job is stuck (server restarted)';
+            else if (progress.status === 'running' || progress.status === 'pending') statusText = '🔄 Translation in progress...';
+            else if (progress.status === 'completed') statusText = '✅ Translation completed!';
+            else if (progress.status === 'failed') statusText = '❌ Translation failed';
+            
+            let avgTimeText = '--';
+            if (avgTime > 0) {{
+                if (avgTime < 60) avgTimeText = avgTime.toFixed(1) + 's';
+                else avgTimeText = (avgTime / 60).toFixed(1) + ' min';
+            }}
+            
+            let estTimeText = '--';
+            if (estTime > 0) {{
+                if (estTime < 60) estTimeText = Math.ceil(estTime) + 's';
+                else if (estTime < 3600) estTimeText = Math.ceil(estTime / 60) + ' min';
+                else {{
+                    const hours = Math.floor(estTime / 3600);
+                    const minutes = Math.ceil((estTime % 3600) / 60);
+                    estTimeText = hours + 'h ' + minutes + 'm';
+                }}
+            }}
+            
+            container.innerHTML = '<div style="margin-bottom: 20px;">' +
+                '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">' +
+                '<span style="font-size: 1.2em; font-weight: bold; color: white;">🤖 Auto Translation Progress</span>' +
+                '<div style="display: flex; align-items: center; gap: 10px;">' +
+                '<span id="auto_translate_status" style="font-size: 1em; background: rgba(255,255,255,0.3); padding: 8px 15px; border-radius: 20px; font-weight: bold; color: white;">' + completed + ' / ' + total + ' pages</span>' +
+                (progress.status === 'stuck' ? 
+                    '<button id="auto_translate_resume_btn" data-job-id="' + progress.job_id + '" style="background: rgba(76,175,80,0.8); border: none; color: white; padding: 8px 15px; border-radius: 20px; cursor: pointer; font-weight: bold; font-size: 0.9em; margin-right: 10px;">▶ Resume</button>' + 
+                    '<button id="auto_translate_restart_btn" data-job-id="' + progress.job_id + '" style="background: rgba(255,152,0,0.8); border: none; color: white; padding: 8px 15px; border-radius: 20px; cursor: pointer; font-weight: bold; font-size: 0.9em; margin-right: 10px;">🔄 Restart</button>' : 
+                    '') +
+                ((progress.status === 'running' || progress.status === 'pending') ? 
+                    '<button id="auto_translate_restart_btn" data-job-id="' + progress.job_id + '" style="background: rgba(255,152,0,0.8); border: none; color: white; padding: 8px 15px; border-radius: 20px; cursor: pointer; font-weight: bold; font-size: 0.9em; margin-right: 10px;">🔄 Restart</button>' : 
+                    '') +
+                (progress.status === 'completed' || progress.status === 'failed' ? 
+                    '<button id="auto_translate_close_btn" onclick="closeProgressDialog()" style="background: rgba(255,255,255,0.3); border: none; color: white; padding: 8px 15px; border-radius: 20px; cursor: pointer; font-weight: bold; font-size: 0.9em;">✕ Close</button>' : 
+                    '') +
+                '</div>' +
+                '</div>' +
+                '<div style="width: 100%; background: rgba(255,255,255,0.3); border-radius: 10px; height: 40px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);">' +
+                '<div id="auto_translate_progress_bar" style="width: ' + percent + '%; background: linear-gradient(90deg, #4CAF50, #45a049); height: 100%; transition: width 0.8s ease; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 1em;">' +
+                '<span id="auto_translate_percent">' + percent + '%</span>' +
+                '</div>' +
+                '</div>' +
+                '</div>' +
+                '<div id="auto_translate_stats" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; font-size: 1em; margin-top: 10px;">' +
+                '<div style="background: rgba(76,175,80,0.2); padding: 12px 15px; border-radius: 10px; text-align: center;">' +
+                '<div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 5px;">✅ Translated:</div>' +
+                '<div id="auto_translated_count" style="font-size: 1.8em; font-weight: bold; color: #4CAF50;">' + completed + '</div>' +
+                '</div>' +
+                '<div style="background: rgba(244,67,54,0.2); padding: 12px 15px; border-radius: 10px; text-align: center;">' +
+                '<div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 5px;">❌ Failed:</div>' +
+                '<div id="auto_failed_count" style="font-size: 1.8em; font-weight: bold; color: #F44336;">' + failed + '</div>' +
+                '</div>' +
+                '<div style="background: rgba(33,150,243,0.2); padding: 12px 15px; border-radius: 10px; text-align: center;">' +
+                '<div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 5px;">📊 Total:</div>' +
+                '<div id="auto_total_count" style="font-size: 1.8em; font-weight: bold; color: #2196F3;">' + total + '</div>' +
+                '</div>' +
+                '</div>' +
+                '<div id="auto_translate_current" style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 10px; margin-top: 10px;">' +
+                '<div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 8px; color: rgba(255,255,255,0.9);">Current Status:</div>' +
+                '<div id="auto_translate_current_text" style="font-size: 1.1em; font-weight: 500; color: white;">' + statusText + '</div>' +
+                '</div>' +
+                '<div id="auto_translate_timing" style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 10px; margin-top: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">' +
+                '<div>' +
+                '<div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 5px; color: rgba(255,255,255,0.9);">⏱️ Avg Time/Page:</div>' +
+                '<div id="auto_translate_avg_time" style="font-size: 1.3em; font-weight: bold; color: #FFC107;">' + avgTimeText + '</div>' +
+                '</div>' +
+                '<div>' +
+                '<div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 5px; color: rgba(255,255,255,0.9);">⏳ Est. Time Remaining:</div>' +
+                '<div id="auto_translate_est_time" style="font-size: 1.3em; font-weight: bold; color: #4CAF50;">' + estTimeText + '</div>' +
+                '</div>' +
+                '</div>';
+            
+            // Attach event listener to resume button if it exists
+            setTimeout(function() {{
+                const resumeBtn = getElement('auto_translate_resume_btn');
+                if (resumeBtn && !resumeBtn._hasClickListener) {{
+                    const jobIdToResume = resumeBtn.getAttribute('data-job-id');
+                    resumeBtn.addEventListener('click', function(e) {{
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (jobIdToResume) {{
+                            resumeTranslationJob(parseInt(jobIdToResume));
+                        }}
+                        return false;
+                    }});
+                    resumeBtn._hasClickListener = true;
+                }}
+                
+                // Attach event listener to restart button if it exists
+                const restartBtn = getElement('auto_translate_restart_btn');
+                if (restartBtn && !restartBtn._hasClickListener) {{
+                    const jobIdToRestart = restartBtn.getAttribute('data-job-id');
+                    restartBtn.addEventListener('click', function(e) {{
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (jobIdToRestart && confirm('Are you sure you want to restart the translation? This will delete all existing translations and start from the beginning.')) {{
+                            restartTranslationJob(parseInt(jobIdToRestart));
+                        }}
+                        return false;
+                    }});
+                    restartBtn._hasClickListener = true;
+                }}
+            }}, 100);
+        }}
+        
+        // Poll for job progress
+        function pollJobProgress() {{
+            if (!jobId) {{
+                // Try to get active job for this book
+                fetch(API_BASE + '/api/pdf/translation-job-for-book/' + bookId)
+                    .then(response => {{
+                        if (response.status === 404) {{
+                            stopPolling();
+                            return null;
+                        }}
+                        return response.json();
+                    }})
+                    .then(data => {{
+                        if (data && data.job_id) {{
+                            jobId = data.job_id;
+                            updateProgress(data);
+                            isPolling = true;
+                            if (data.status === 'running' || data.status === 'pending') {{
+                                pollInterval = setTimeout(pollJobProgress, 1000);
+                            }} else if (data.status === 'stuck') {{
+                                // Don't poll for stuck jobs - wait for user to resume
+                                stopPolling();
+                            }} else {{
+                                stopPolling();
+                                if (data.status === 'completed') {{
+                                    setTimeout(() => window.location.reload(), 3000);
+                                }}
+                            }}
+                        }} else {{
+                            stopPolling();
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error polling job progress:', error);
+                        // Continue polling even on error (retry after 1 second)
+                        if (isPolling) {{
+                            pollInterval = setTimeout(pollJobProgress, 1000);
+                        }}
+                    }});
+            }} else {{
+                // Poll specific job
+                fetch(API_BASE + '/api/pdf/translation-job-progress/' + jobId)
+                    .then(response => {{
+                        if (!response.ok) {{
+                            throw new Error('HTTP error! status: ' + response.status);
+                        }}
+                        return response.json();
+                    }})
+                    .then(data => {{
+                        updateProgress(data);
+                        if (data.status === 'running' || data.status === 'pending') {{
+                            pollInterval = setTimeout(pollJobProgress, 1000);
+                        }} else if (data.status === 'stuck') {{
+                            // Don't poll for stuck jobs - wait for user to resume
+                            stopPolling();
+                        }} else {{
+                            stopPolling();
+                            if (data.status === 'completed') {{
+                                setTimeout(() => window.location.reload(), 3000);
+                            }}
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error polling job progress:', error);
+                        // Continue polling even on error (retry after 1 second)
+                        if (isPolling) {{
+                            pollInterval = setTimeout(pollJobProgress, 1000);
+                        }}
+                    }});
+            }}
+        }}
+        
+        // Stop polling
+        function stopPolling() {{
+            if (pollInterval) {{
+                clearTimeout(pollInterval);
+                pollInterval = null;
+            }}
+            isPolling = false;
+        }}
+        
+        // Start translation job
+        function {auto_translate_func_name}(e) {{
+            console.log('🚀 Auto Translate button clicked!', e);
+            
+            if (e) {{
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }}
+            
+            if (isPolling) {{
+                console.warn('⚠️ Translation already in progress');
+                return false;
+            }}
+            
+            const translateLink = getElement('{auto_translate_link_id}');
+            if (!translateLink) {{
+                console.error('❌ Auto translate link not found');
+                return false;
+            }}
+            
+            console.log('✅ Auto translate link found, starting background job...');
+            
+            // Get settings from Streamlit inputs
+            let ollamaModel = 'aya:8b';
+            let ollamaUrl = 'http://localhost:11434';
+            let useRefinement = true;
+            let temperature = 0.2;
+            
+            // Find Ollama Model input
+            const modelInputs = document.querySelectorAll('input[type="text"]');
+            for (let input of modelInputs) {{
+                const closest = input.closest('.stTextInput');
+                const label = closest ? (closest.querySelector('label') ? closest.querySelector('label').textContent : '') : '';
+                if (label.includes('Ollama Model') || input.value.includes('aya')) {{
+                    ollamaModel = input.value || 'aya:8b';
+                    break;
+                }}
+            }}
+            
+            // Find Ollama Base URL input
+            for (let input of modelInputs) {{
+                const closest = input.closest('.stTextInput');
+                const label = closest ? (closest.querySelector('label') ? closest.querySelector('label').textContent : '') : '';
+                if (label.includes('Ollama Base URL') || (input.value.includes('localhost') && input.value.includes('11434'))) {{
+                    ollamaUrl = input.value || 'http://localhost:11434';
+                    break;
+                }}
+            }}
+            
+            // Find refinement checkbox
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+            for (let checkbox of checkboxes) {{
+                const labelEl = checkbox.closest('label');
+                const label = labelEl ? labelEl.textContent : '';
+                if (label.includes('Two-Step') || label.includes('Refinement')) {{
+                    useRefinement = checkbox.checked !== false;
+                    break;
+                }}
+            }}
+            
+            // Find temperature slider
+            const sliders = document.querySelectorAll('input[type="range"]');
+            for (let slider of sliders) {{
+                const closest = slider.closest('.stSlider');
+                const label = closest ? (closest.querySelector('label') ? closest.querySelector('label').textContent : '') : '';
+                if (label.includes('Temperature')) {{
+                    temperature = parseFloat(slider.value || '0.2');
+                    break;
+                }}
+            }}
+            
+            console.log('📋 Starting translation job with settings:', {{
+                ollamaModel: ollamaModel,
+                ollamaUrl: ollamaUrl,
+                useRefinement: useRefinement,
+                temperature: temperature
+            }});
+            
+            // Show initial progress
+            updateProgress({{
+                status: 'pending',
+                total_pages: totalPages,
+                completed_pages: 0,
+                failed_pages: 0,
+                avg_time_per_page: 0,
+                estimated_time_remaining: 0
+            }});
+            
+            translateLink.textContent = '⏳ Starting...';
+            translateLink.style.pointerEvents = 'none';
+            translateLink.style.color = '#ff9800';
+            
+            // Start background job
+            fetch(API_BASE + '/api/pdf/start-translation-job', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{
+                    book_id: bookId,
+                    ollama_model: ollamaModel,
+                    ollama_base_url: ollamaUrl,
+                    use_refinement: useRefinement,
+                    temperature: temperature,
+                    parallel_workers: 10
+                }})
+            }})
+            .then(response => response.json())
+            .then(data => {{
+                if (data.success) {{
+                    jobId = data.job_id;
+                    console.log('✅ Translation job started:', jobId);
+                    translateLink.textContent = '⏳ Translating...';
+                    isPolling = true;
+                    // Start polling
+                    pollJobProgress();
+                }} else {{
+                    console.error('❌ Failed to start job:', data.message);
+                    translateLink.textContent = '❌ Failed to start';
+                    translateLink.style.color = '#f44336';
+                }}
+            }})
+            .catch(error => {{
+                console.error('❌ Error starting job:', error);
+                translateLink.textContent = '❌ Error';
+                translateLink.style.color = '#f44336';
+            }});
+            
+            return false;
+        }}
+        
+        // Check for existing job on page load and automatically show progress dialog
+        (function checkExistingJob() {{
+            fetch(API_BASE + '/api/pdf/translation-job-for-book/' + bookId)
+                .then(response => {{
+                    if (response.status === 404) return null;
+                    if (!response.ok) throw new Error('HTTP error! status: ' + response.status);
+                    return response.json();
+                }})
+                .then(data => {{
+                    if (data && (data.status === 'running' || data.status === 'pending')) {{
+                        console.log('🔄 Found existing job:', data.job_id, 'Status:', data.status);
+                        jobId = data.job_id;
+                        isPolling = true;
+                        // Automatically show progress dialog
+                        updateProgress(data);
+                        // Start polling immediately
+                        pollJobProgress();
+                    }} else if (data && data.status === 'stuck') {{
+                        // Show stuck job with resume button
+                        console.log('⚠️ Found stuck job:', data.job_id);
+                        jobId = data.job_id;
+                        updateProgress(data);
+                        // Don't poll for stuck jobs - wait for user to resume
+                    }} else if (data && (data.status === 'completed' || data.status === 'failed')) {{
+                        // Show final status even if completed
+                        console.log('✅ Found completed/failed job:', data.job_id);
+                        jobId = data.job_id;
+                        updateProgress(data);
+                        // Don't poll for completed/failed jobs
+                    }}
+                }})
+                .catch(error => {{
+                    console.log('No existing job found or error:', error);
+                }});
+        }})();
+        
+        // Make function globally accessible
+        window.{auto_translate_func_name} = {auto_translate_func_name};
+        
+        // Attach event listener
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', function() {{
+                const link = getElement('{auto_translate_link_id}');
+                if (link) {{
+                    link.addEventListener('click', function(e) {{
+                        e.preventDefault();
+                        e.stopPropagation();
+                        {auto_translate_func_name}(e);
+                        return false;
+                    }}, true);
+                }}
+            }});
+        }} else {{
+            const link = getElement('{auto_translate_link_id}');
+            if (link) {{
+                link.addEventListener('click', function(e) {{
+                    e.preventDefault();
+                    e.stopPropagation();
+                    {auto_translate_func_name}(e);
+                    return false;
+                }}, true);
+            }}
+        }}
+    }})();
+    </script>
+    <a href="#" 
+       id="{auto_translate_link_id}" 
+       onclick="event.preventDefault(); event.stopPropagation(); return {auto_translate_func_name}(event);"
+       style="text-decoration: none; color: #1f77b4; cursor: pointer; font-size: 1em; display: inline-block; font-weight: bold; padding: 8px 16px; border: 2px solid #1f77b4; border-radius: 4px; background-color: #f0f8ff; z-index: 1000; position: relative;">
+       🤖 Auto Translate
+    </a>
+    </div>
+    """
+    from streamlit.components.v1 import html
+    html(auto_translate_html, height=50)
+
+# Auto Translate settings (always visible)
+with st.expander("⚙️ Auto Translation Settings", expanded=False):
+    col_set1, col_set2, col_set3 = st.columns(3)
+    with col_set1:
+        ollama_model = st.text_input("Ollama Model", value="aya:8b", help="Model to use for translation", key="auto_ollama_model")
+    with col_set2:
+        ollama_base_url_input = st.text_input("Ollama Base URL", value=DEFAULT_OLLAMA_BASE_URL, key="auto_ollama_url")
+    with col_set3:
+        use_refinement = st.checkbox("Use Two-Step Refinement", value=True, key="auto_refinement")
+        translation_temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.1, key="auto_temp")
+    
+    st.info("💡 Click '🤖 Auto Translate' above to start. The process will run in the background on the server. You can close the browser and come back later - progress will be saved!")
 
 # Navigation controls - placed early for quick response
 col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 2, 1, 1])

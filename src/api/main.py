@@ -43,6 +43,10 @@ app.add_middleware(
 # Initialize database
 db = ExpenseDB()
 
+# Initialize translation job manager
+from src.api.translation_job_manager import TranslationJobManager
+translation_job_manager = TranslationJobManager(BooksDBManager())
+
 
 # Helper functions
 def get_current_month_dates():
@@ -882,6 +886,534 @@ async def save_translation(request: TranslationSaveRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving translation: {str(e)}")
+
+
+class AutoTranslateRequest(BaseModel):
+    book_id: int
+    page_number: int
+    ollama_model: str = "aya:8b"
+    ollama_base_url: str = "http://localhost:11434"
+    use_refinement: bool = True
+    temperature: float = 0.2
+
+
+class AutoTranslateResponse(BaseModel):
+    success: bool
+    message: str
+    translated_text: Optional[str] = None
+    page_number: int
+
+
+@app.post("/api/pdf/auto-translate-page", response_model=AutoTranslateResponse)
+async def auto_translate_page(request: AutoTranslateRequest):
+    """Auto-translate a single page using Ollama."""
+    import logging
+    import time as time_module
+    logger = logging.getLogger(__name__)
+    
+    start_time = time_module.time()
+    page_num = request.page_number + 1
+    
+    logger.info(f"{'='*60}")
+    logger.info(f"🔄 [API] Auto-translate request received: Book ID={request.book_id}, Page={page_num}")
+    logger.info(f"📋 [API] Settings: model={request.ollama_model}, refinement={request.use_refinement}, temp={request.temperature}")
+    logger.info(f"{'='*60}")
+    
+    try:
+        from langchain_ollama import OllamaLLM
+        
+        # Get book from database
+        books_db = BooksDBManager()
+        book = books_db.get_book(request.book_id)
+        
+        if not book:
+            raise HTTPException(status_code=404, detail=f"Book with ID {request.book_id} not found")
+        
+        # Get English text from the page
+        pdf_path = Path(book['file_path'])
+        if not pdf_path.exists():
+            logger.error(f"❌ [API] PDF file not found: {pdf_path}")
+            raise HTTPException(status_code=404, detail=f"PDF file not found: {pdf_path}")
+        
+        logger.info(f"📄 [Page {page_num}] Step 1: Extracting text...")
+        extract_start = time_module.time()
+        # Extract text from page
+        english_text = extract_pdf_page_text_accurate(pdf_path, request.page_number)
+        extract_time = time_module.time() - extract_start
+        logger.info(f"⏱️  [Page {page_num}] Step 1 completed: Text extraction in {extract_time:.2f}s")
+        
+        # Handle blank pages - save empty translation and continue
+        if not english_text or not english_text.strip():
+            logger.warning(f"⚠️  [Page {page_num}] No text found - this is a blank page")
+            logger.info(f"💾 [Page {page_num}] Saving empty translation for blank page...")
+            
+            # Save empty translation for blank page
+            save_start = time_module.time()
+            success = books_db.save_translation(
+                book_id=request.book_id,
+                page_number=request.page_number,
+                original_text="",
+                translated_text=""
+            )
+            save_time = time_module.time() - save_start
+            
+            if success:
+                total_time = time_module.time() - start_time
+                logger.info(f"✅ [Page {page_num}] Blank page saved successfully in {save_time:.2f}s")
+                logger.info(f"✅ [Page {page_num}] COMPLETE - Blank page processed in {total_time:.2f}s")
+                logger.info(f"{'='*60}")
+                return AutoTranslateResponse(
+                    success=True,
+                    message=f"Blank page {page_num} - saved empty translation",
+                    translated_text="",
+                    page_number=request.page_number
+                )
+            else:
+                total_time = time_module.time() - start_time
+                logger.error(f"❌ [Page {page_num}] Failed to save blank page after {save_time:.2f}s")
+                logger.error(f"❌ [Page {page_num}] FAILED after {total_time:.2f}s")
+                logger.info(f"{'='*60}")
+                return AutoTranslateResponse(
+                    success=False,
+                    message=f"Failed to save blank page {page_num}",
+                    page_number=request.page_number
+                )
+        
+        text_length = len(english_text)
+        logger.info(f"✅ [Page {page_num}] Extracted {text_length} characters")
+        
+        # Initialize Ollama LLM
+        try:
+            logger.info(f"🤖 [Page {page_num}] Step 2: Initializing Ollama LLM ({request.ollama_model})...")
+            init_start = time_module.time()
+            llm = OllamaLLM(
+                model=request.ollama_model,
+                base_url=request.ollama_base_url,
+                temperature=request.temperature,
+                top_p=0.9,
+                num_ctx=4096
+            )
+            init_time = time_module.time() - init_start
+            logger.info(f"✅ [Page {page_num}] Step 2 completed: Ollama initialized in {init_time:.2f}s")
+        except Exception as e:
+            total_time = time_module.time() - start_time
+            logger.error(f"❌ [Page {page_num}] Step 2 FAILED: Ollama initialization error after {total_time:.2f}s: {str(e)}")
+            logger.error(f"❌ [Page {page_num}] FAILED during Ollama initialization")
+            logger.info(f"{'='*60}")
+            raise HTTPException(status_code=500, detail=f"Failed to initialize Ollama model: {str(e)}")
+        
+        # Translation prompt
+        if request.use_refinement:
+            logger.info(f"🔄 [Page {page_num}] Step 3: Starting two-step translation (refinement enabled)")
+            
+            # Step 1: Initial translation
+            initial_prompt = f"""Translate the following English text to Hindi. Focus on accuracy and meaning.
+
+English text:
+{english_text}
+
+Provide the Hindi translation:"""
+            
+            logger.info(f"📝 [Page {page_num}] Step 3a: Calling Ollama for initial translation (may take 10-30s)...")
+            translate_start = time_module.time()
+            initial_translation = llm.invoke(initial_prompt).strip()
+            translate_time = time_module.time() - translate_start
+            logger.info(f"✅ [Page {page_num}] Step 3a completed: Initial translation in {translate_time:.2f}s ({len(initial_translation)} chars)")
+            
+            # Step 2: Refinement
+            refinement_prompt = f"""You are refining a Hindi translation to make it more natural, fluent, and accurate.
+
+ORIGINAL ENGLISH TEXT:
+{english_text}
+
+CURRENT HINDI TRANSLATION:
+{initial_translation}
+
+TASK: Refine this translation to:
+1. Make it sound more natural and fluent in Hindi
+2. Improve word choice and expressions
+3. Ensure proper grammar and sentence structure
+4. Enhance readability and flow
+5. Fix any awkward phrasings or literal translations
+
+Output ONLY the refined Hindi translation, no explanations:"""
+            
+            logger.info(f"✨ [Page {page_num}] Step 3b: Calling Ollama for refinement (may take 10-30s)...")
+            refine_start = time_module.time()
+            hindi_translation = llm.invoke(refinement_prompt).strip()
+            refine_time = time_module.time() - refine_start
+            logger.info(f"✅ [Page {page_num}] Step 3b completed: Refinement in {refine_time:.2f}s ({len(hindi_translation)} chars)")
+        else:
+            # Single-step translation
+            translation_prompt = f"""You are a professional translator with native-level proficiency in both English and Hindi. Your expertise includes understanding cultural nuances, idiomatic expressions, and context-dependent meanings.
+
+TASK: Translate the following English text into natural, fluent Hindi that reads as if it were originally written in Hindi.
+
+TRANSLATION GUIDELINES:
+1. **Context Understanding**: Analyze the full context, not individual words. Understand the intended meaning, tone, and purpose.
+2. **Natural Flow**: The translation should flow naturally in Hindi, using appropriate sentence structures and word order.
+3. **Cultural Adaptation**: Adapt cultural references, idioms, and expressions to be meaningful in Hindi context.
+4. **Vocabulary Selection**: Choose the most appropriate Hindi words that convey the exact meaning and register (formal/informal).
+5. **Grammar & Syntax**: Use correct Hindi grammar, including proper use of matras (diacritics), verb conjugations, and case markers.
+6. **Technical Terms**: For technical terms, use standard Hindi translations when available, or transliterate appropriately.
+7. **Proper Nouns**: Keep names, places, and brand names as-is or use common Hindi transliterations.
+8. **Tone Preservation**: Maintain the original tone (formal, casual, technical, narrative, etc.).
+
+ORIGINAL ENGLISH TEXT:
+{english_text}
+
+TRANSLATION REQUIREMENTS:
+- Output ONLY the Hindi translation
+- No explanations, notes, or additional text
+- Preserve paragraph breaks and formatting
+- Use proper Devanagari script
+
+Hindi Translation:"""
+            
+            logger.info(f"📝 [Page {page_num}] Step 3: Calling Ollama for translation (may take 10-30s)...")
+            translate_start = time_module.time()
+            hindi_translation = llm.invoke(translation_prompt).strip()
+            translate_time = time_module.time() - translate_start
+            logger.info(f"✅ [Page {page_num}] Step 3 completed: Translation in {translate_time:.2f}s ({len(hindi_translation)} chars)")
+        
+        # Clean up translation (remove prefixes)
+        logger.info(f"🧹 [Page {page_num}] Step 4: Cleaning up translation text...")
+        prefixes_to_remove = [
+            "Hindi translation:", "Translation:", "Here is the translation:",
+            "The Hindi translation is:", "हिंदी अनुवाद:", "अनुवाद:",
+            "Hindi Translation:", "TRANSLATION:"
+        ]
+        for prefix in prefixes_to_remove:
+            if hindi_translation.lower().startswith(prefix.lower()):
+                hindi_translation = hindi_translation[len(prefix):].strip()
+        logger.info(f"✅ [Page {page_num}] Step 4 completed: Translation cleaned ({len(hindi_translation)} chars)")
+        
+        # Save translation
+        logger.info(f"💾 [Page {page_num}] Step 5: Saving translation to database...")
+        save_start = time_module.time()
+        success = books_db.save_translation(
+            book_id=request.book_id,
+            page_number=request.page_number,
+            original_text=english_text,
+            translated_text=hindi_translation
+        )
+        save_time = time_module.time() - save_start
+        
+        if success:
+            total_time = time_module.time() - start_time
+            logger.info(f"✅ [Page {page_num}] Step 5 completed: Translation saved in {save_time:.2f}s")
+            logger.info(f"✅ [Page {page_num}] COMPLETE - Processed successfully in {total_time:.2f}s")
+            if request.use_refinement:
+                logger.info(f"   📊 Breakdown: Extract={extract_time:.2f}s, Translate={translate_time:.2f}s, Refine={refine_time:.2f}s, Save={save_time:.2f}s")
+            else:
+                logger.info(f"   📊 Breakdown: Extract={extract_time:.2f}s, Translate={translate_time:.2f}s, Save={save_time:.2f}s")
+            logger.info(f"{'='*60}")
+            return AutoTranslateResponse(
+                success=True,
+                message=f"Page {page_num} translated and saved",
+                translated_text=hindi_translation,
+                page_number=request.page_number
+            )
+        else:
+            total_time = time_module.time() - start_time
+            logger.error(f"❌ [Page {page_num}] Step 5 FAILED: Save error after {save_time:.2f}s")
+            logger.error(f"❌ [Page {page_num}] FAILED during save after {total_time:.2f}s")
+            logger.info(f"{'='*60}")
+            raise HTTPException(status_code=400, detail="Failed to save translation")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error auto-translating page: {str(e)}")
+
+
+# Background Translation Job Endpoints
+class StartTranslationJobRequest(BaseModel):
+    book_id: int
+    ollama_model: str = "aya:8b"
+    ollama_base_url: str = "http://localhost:11434"
+    use_refinement: bool = True
+    temperature: float = 0.2
+    parallel_workers: int = 10
+
+
+class StartTranslationJobResponse(BaseModel):
+    success: bool
+    message: str
+    job_id: int
+
+
+class TranslationJobProgressResponse(BaseModel):
+    success: bool
+    job_id: int
+    book_id: int
+    status: str
+    total_pages: int
+    completed_pages: int
+    failed_pages: int
+    avg_time_per_page: float
+    estimated_time_remaining: float
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@app.post("/api/pdf/start-translation-job", response_model=StartTranslationJobResponse)
+async def start_translation_job(request: StartTranslationJobRequest):
+    """Start a background translation job for a book."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        books_db = BooksDBManager()
+        
+        # Check if book exists
+        book = books_db.get_book(request.book_id)
+        if not book:
+            raise HTTPException(status_code=404, detail=f"Book with ID {request.book_id} not found")
+        
+        # Check if there's already an active job for this book
+        active_job = books_db.get_active_job_for_book(request.book_id)
+        if active_job:
+            return StartTranslationJobResponse(
+                success=True,
+                message=f"Translation job already running (Job ID: {active_job['id']})",
+                job_id=active_job['id']
+            )
+        
+        # Get total pages
+        pdf_path = Path(book['file_path'])
+        if not pdf_path.exists():
+            raise HTTPException(status_code=404, detail=f"PDF file not found: {pdf_path}")
+        
+        import fitz
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+        doc.close()
+        
+        if total_pages == 0:
+            raise HTTPException(status_code=400, detail="PDF has no pages")
+        
+        # Create job in database
+        job_id = books_db.create_translation_job(
+            book_id=request.book_id,
+            total_pages=total_pages,
+            ollama_model=request.ollama_model,
+            ollama_base_url=request.ollama_base_url,
+            use_refinement=request.use_refinement,
+            temperature=request.temperature,
+            parallel_workers=request.parallel_workers
+        )
+        
+        # Start background job
+        translation_job_manager.start_translation_job(
+            job_id=job_id,
+            book_id=request.book_id,
+            total_pages=total_pages,
+            ollama_model=request.ollama_model,
+            ollama_base_url=request.ollama_base_url,
+            use_refinement=request.use_refinement,
+            temperature=request.temperature,
+            parallel_workers=request.parallel_workers
+        )
+        
+        logger.info(f"✅ Started translation job {job_id} for book {request.book_id} ({total_pages} pages)")
+        
+        return StartTranslationJobResponse(
+            success=True,
+            message=f"Translation job started (Job ID: {job_id})",
+            job_id=job_id
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error starting translation job: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error starting translation job: {str(e)}")
+
+
+@app.get("/api/pdf/translation-job-progress/{job_id}", response_model=TranslationJobProgressResponse)
+async def get_translation_job_progress(job_id: int):
+    """Get progress for a translation job."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        progress = translation_job_manager.get_job_progress(job_id)
+        
+        if not progress:
+            raise HTTPException(status_code=404, detail=f"Translation job {job_id} not found")
+        
+        return TranslationJobProgressResponse(**progress)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error getting job progress: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting job progress: {str(e)}")
+
+
+@app.get("/api/pdf/translation-job-for-book/{book_id}", response_model=TranslationJobProgressResponse)
+async def get_translation_job_for_book(book_id: int):
+    """Get active translation job for a book."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        books_db = BooksDBManager()
+        job = books_db.get_active_job_for_book(book_id)
+        
+        if not job:
+            raise HTTPException(status_code=404, detail=f"No active translation job found for book {book_id}")
+        
+        progress = translation_job_manager.get_job_progress(job['id'])
+        
+        if not progress:
+            # Job exists in DB but not in memory - check if it's stuck
+            is_actually_running = translation_job_manager.is_job_running(job['id'])
+            if not is_actually_running and job['status'] in ['running', 'pending']:
+                # Job is stuck - mark status as 'stuck' for frontend
+                status = 'stuck'
+            else:
+                status = job['status']
+            
+            return TranslationJobProgressResponse(
+                success=True,
+                job_id=job['id'],
+                book_id=job['book_id'],
+                status=status,
+                total_pages=job['total_pages'],
+                completed_pages=job.get('completed_pages', 0),
+                failed_pages=job.get('failed_pages', 0),
+                avg_time_per_page=job.get('avg_time_per_page') or 0.0,
+                estimated_time_remaining=job.get('estimated_time_remaining') or 0.0,
+                started_at=str(job.get('started_at')) if job.get('started_at') else None,
+                completed_at=str(job.get('completed_at')) if job.get('completed_at') else None,
+                error_message=job.get('error_message')
+            )
+        
+        # Check if job is actually running
+        is_actually_running = translation_job_manager.is_job_running(job['id'])
+        if not is_actually_running and progress['status'] in ['running', 'pending']:
+            progress['status'] = 'stuck'
+        
+        return TranslationJobProgressResponse(**progress)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error getting job for book: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting job for book: {str(e)}")
+
+
+@app.post("/api/pdf/resume-translation-job/{job_id}")
+async def resume_translation_job(job_id: int):
+    """Resume a stuck translation job."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        success = translation_job_manager.resume_job(job_id)
+        if success:
+            return {"success": True, "message": f"Translation job {job_id} resumed successfully"}
+        else:
+            raise HTTPException(status_code=400, detail=f"Could not resume job {job_id}. It may already be running or have an invalid status.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error resuming translation job: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error resuming translation job: {str(e)}")
+
+
+@app.post("/api/pdf/restart-translation-job/{job_id}")
+async def restart_translation_job(job_id: int):
+    """Restart a translation job from the beginning, clearing all existing translations."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        books_db = BooksDBManager()
+        
+        # Get job info
+        job = books_db.get_translation_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        
+        book_id = job['book_id']
+        
+        # Cancel/stop the current job if running
+        translation_job_manager.cancel_job(job_id)
+        
+        # Delete all existing translations for this book
+        logger.info(f"🗑️ Deleting all translations for book {book_id}")
+        import sqlite3
+        conn = sqlite3.connect(books_db.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM book_translations WHERE book_id = ?", (book_id,))
+        conn.commit()
+        conn.close()
+        
+        # Mark old job as cancelled
+        books_db.complete_job(job_id, 'cancelled', 'Restarted by user')
+        
+        # Create a new job
+        new_job_id = books_db.create_translation_job(
+            book_id=book_id,
+            total_pages=job['total_pages'],
+            ollama_model=job['ollama_model'],
+            ollama_base_url=job['ollama_base_url'],
+            use_refinement=job['use_refinement'],
+            temperature=job['temperature'],
+            parallel_workers=job.get('parallel_workers', 10)
+        )
+        
+        # Start the new job
+        translation_job_manager.start_translation_job(
+            job_id=new_job_id,
+            book_id=book_id,
+            total_pages=job['total_pages'],
+            ollama_model=job['ollama_model'],
+            ollama_base_url=job['ollama_base_url'],
+            use_refinement=job['use_refinement'],
+            temperature=job['temperature'],
+            parallel_workers=job.get('parallel_workers', 10)
+        )
+        
+        logger.info(f"✅ Restarted translation job: old={job_id}, new={new_job_id} for book {book_id}")
+        
+        return {
+            "success": True,
+            "message": f"Translation job restarted from beginning",
+            "old_job_id": job_id,
+            "new_job_id": new_job_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error restarting translation job: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error restarting translation job: {str(e)}")
+
+
+@app.post("/api/pdf/cancel-translation-job/{job_id}")
+async def cancel_translation_job(job_id: int):
+    """Cancel a running translation job."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        success = translation_job_manager.cancel_job(job_id)
+        
+        if success:
+            return {"success": True, "message": f"Job {job_id} cancelled"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found or not running")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error cancelling job: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error cancelling job: {str(e)}")
 
 
 class PDFGenerateRequest(BaseModel):

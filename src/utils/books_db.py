@@ -80,6 +80,46 @@ class BooksDBManager:
             CREATE INDEX IF NOT EXISTS idx_translations_book_page ON book_translations(book_id, page_number)
         """)
         
+        # Create translation_jobs table for tracking background translation jobs
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS translation_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                total_pages INTEGER NOT NULL,
+                completed_pages INTEGER DEFAULT 0,
+                failed_pages INTEGER DEFAULT 0,
+                ollama_model TEXT,
+                ollama_base_url TEXT,
+                use_refinement BOOLEAN,
+                temperature REAL,
+                parallel_workers INTEGER DEFAULT 10,
+                avg_time_per_page REAL,
+                estimated_time_remaining REAL,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                error_message TEXT,
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+            )
+        """)
+        
+        # Create index on book_id and status for faster lookups
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_jobs_book_status ON translation_jobs(book_id, status)
+        """)
+        
+        # Add parallel_workers column if it doesn't exist (migration)
+        try:
+            cursor.execute("ALTER TABLE translation_jobs ADD COLUMN parallel_workers INTEGER DEFAULT 10")
+            conn.commit()
+            logger.info("Added parallel_workers column to translation_jobs table")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                # Column already exists, that's fine
+                pass
+            else:
+                logger.warning(f"Could not add parallel_workers column: {e}")
+        
         conn.commit()
         conn.close()
     
@@ -437,4 +477,200 @@ class BooksDBManager:
             return [row[0] for row in rows]
         finally:
             conn.close()
+    
+    def create_translation_job(
+        self,
+        book_id: int,
+        total_pages: int,
+        ollama_model: str,
+        ollama_base_url: str,
+        use_refinement: bool,
+        temperature: float,
+        parallel_workers: int = 10
+    ) -> int:
+        """Create a new translation job in the database.
+        
+        Args:
+            book_id: ID of the book
+            total_pages: Total number of pages to translate
+            ollama_model: Ollama model to use
+            ollama_base_url: Ollama base URL
+            use_refinement: Whether to use two-step refinement
+            temperature: Temperature setting
+            
+        Returns:
+            ID of the newly created job
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                INSERT INTO translation_jobs 
+                (book_id, status, total_pages, ollama_model, ollama_base_url, use_refinement, temperature, parallel_workers, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                book_id,
+                'pending',
+                total_pages,
+                ollama_model,
+                ollama_base_url,
+                use_refinement,
+                temperature,
+                parallel_workers,
+                datetime.now()
+            ))
+            
+            job_id = cursor.lastrowid
+            conn.commit()
+            return job_id
+        finally:
+            conn.close()
+    
+    def get_active_job_for_book(self, book_id: int) -> Optional[Dict]:
+        """Get the active (pending or running) translation job for a book.
+        
+        Args:
+            book_id: ID of the book
+            
+        Returns:
+            Dictionary containing job information, or None if no active job found
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT * FROM translation_jobs 
+                WHERE book_id = ? AND status IN ('pending', 'running')
+                ORDER BY started_at DESC
+                LIMIT 1
+            """, (book_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    
+    def update_job_progress(
+        self,
+        job_id: int,
+        completed_pages: Optional[int] = None,
+        failed_pages: Optional[int] = None,
+        avg_time_per_page: Optional[float] = None,
+        estimated_time_remaining: Optional[float] = None,
+        status: Optional[str] = None
+    ) -> bool:
+        """Update progress for a translation job.
+        
+        Args:
+            job_id: ID of the job
+            completed_pages: Number of completed pages
+            failed_pages: Number of failed pages
+            avg_time_per_page: Average time per page in seconds
+            estimated_time_remaining: Estimated time remaining in seconds
+            status: Job status (pending, running, completed, failed)
+            
+        Returns:
+            True if update was successful, False otherwise
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            updates = []
+            params = []
+            
+            if completed_pages is not None:
+                updates.append("completed_pages = ?")
+                params.append(completed_pages)
+            
+            if failed_pages is not None:
+                updates.append("failed_pages = ?")
+                params.append(failed_pages)
+            
+            if avg_time_per_page is not None:
+                updates.append("avg_time_per_page = ?")
+                params.append(avg_time_per_page)
+            
+            if estimated_time_remaining is not None:
+                updates.append("estimated_time_remaining = ?")
+                params.append(estimated_time_remaining)
+            
+            if status is not None:
+                updates.append("status = ?")
+                params.append(status)
+            
+            if not updates:
+                return False
+            
+            params.append(job_id)
+            
+            cursor.execute(f"""
+                UPDATE translation_jobs 
+                SET {', '.join(updates)} 
+                WHERE id = ?
+            """, params)
+            
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+    
+    def complete_job(self, job_id: int, status: str, error_message: Optional[str] = None) -> bool:
+        """Mark a translation job as completed or failed.
+        
+        Args:
+            job_id: ID of the job
+            status: Final status ('completed' or 'failed')
+            error_message: Error message if status is 'failed'
+            
+        Returns:
+            True if update was successful, False otherwise
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                UPDATE translation_jobs 
+                SET status = ?, completed_at = ?, error_message = ?
+                WHERE id = ?
+            """, (status, datetime.now(), error_message, job_id))
+            
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+    
+    def get_job(self, job_id: int) -> Optional[Dict]:
+        """Get a translation job by ID.
+        
+        Args:
+            job_id: ID of the job
+            
+        Returns:
+            Dictionary containing job information, or None if not found
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT * FROM translation_jobs WHERE id = ?", (job_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    
+    def get_translation_job(self, job_id: int) -> Optional[Dict]:
+        """Get a translation job by ID (alias for get_job).
+        
+        Args:
+            job_id: ID of the job
+            
+        Returns:
+            Dictionary containing job information, or None if not found
+        """
+        return self.get_job(job_id)
 
