@@ -1002,91 +1002,19 @@ async def auto_translate_page(request: AutoTranslateRequest):
             logger.info(f"{'='*60}")
             raise HTTPException(status_code=500, detail=f"Failed to initialize Ollama model: {str(e)}")
         
-        # Translation prompt
-        if request.use_refinement:
-            logger.info(f"🔄 [Page {page_num}] Step 3: Starting two-step translation (refinement enabled)")
-            
-            # Step 1: Initial translation
-            initial_prompt = f"""Translate the following English text to Hindi. Focus on accuracy and meaning.
-
-English text:
-{english_text}
-
-Provide the Hindi translation:"""
-            
-            logger.info(f"📝 [Page {page_num}] Step 3a: Calling Ollama for initial translation (may take 10-30s)...")
-            translate_start = time_module.time()
-            initial_translation = llm.invoke(initial_prompt).strip()
-            translate_time = time_module.time() - translate_start
-            logger.info(f"✅ [Page {page_num}] Step 3a completed: Initial translation in {translate_time:.2f}s ({len(initial_translation)} chars)")
-            
-            # Step 2: Refinement
-            refinement_prompt = f"""You are refining a Hindi translation to make it more natural, fluent, and accurate.
-
-ORIGINAL ENGLISH TEXT:
-{english_text}
-
-CURRENT HINDI TRANSLATION:
-{initial_translation}
-
-TASK: Refine this translation to:
-1. Make it sound more natural and fluent in Hindi
-2. Improve word choice and expressions
-3. Ensure proper grammar and sentence structure
-4. Enhance readability and flow
-5. Fix any awkward phrasings or literal translations
-
-Output ONLY the refined Hindi translation, no explanations:"""
-            
-            logger.info(f"✨ [Page {page_num}] Step 3b: Calling Ollama for refinement (may take 10-30s)...")
-            refine_start = time_module.time()
-            hindi_translation = llm.invoke(refinement_prompt).strip()
-            refine_time = time_module.time() - refine_start
-            logger.info(f"✅ [Page {page_num}] Step 3b completed: Refinement in {refine_time:.2f}s ({len(hindi_translation)} chars)")
-        else:
-            # Single-step translation
-            translation_prompt = f"""You are a professional translator with native-level proficiency in both English and Hindi. Your expertise includes understanding cultural nuances, idiomatic expressions, and context-dependent meanings.
-
-TASK: Translate the following English text into natural, fluent Hindi that reads as if it were originally written in Hindi.
-
-TRANSLATION GUIDELINES:
-1. **Context Understanding**: Analyze the full context, not individual words. Understand the intended meaning, tone, and purpose.
-2. **Natural Flow**: The translation should flow naturally in Hindi, using appropriate sentence structures and word order.
-3. **Cultural Adaptation**: Adapt cultural references, idioms, and expressions to be meaningful in Hindi context.
-4. **Vocabulary Selection**: Choose the most appropriate Hindi words that convey the exact meaning and register (formal/informal).
-5. **Grammar & Syntax**: Use correct Hindi grammar, including proper use of matras (diacritics), verb conjugations, and case markers.
-6. **Technical Terms**: For technical terms, use standard Hindi translations when available, or transliterate appropriately.
-7. **Proper Nouns**: Keep names, places, and brand names as-is or use common Hindi transliterations.
-8. **Tone Preservation**: Maintain the original tone (formal, casual, technical, narrative, etc.).
-
-ORIGINAL ENGLISH TEXT:
-{english_text}
-
-TRANSLATION REQUIREMENTS:
-- Output ONLY the Hindi translation
-- No explanations, notes, or additional text
-- Preserve paragraph breaks and formatting
-- Use proper Devanagari script
-
-Hindi Translation:"""
-            
-            logger.info(f"📝 [Page {page_num}] Step 3: Calling Ollama for translation (may take 10-30s)...")
-            translate_start = time_module.time()
-            hindi_translation = llm.invoke(translation_prompt).strip()
-            translate_time = time_module.time() - translate_start
-            logger.info(f"✅ [Page {page_num}] Step 3 completed: Translation in {translate_time:.2f}s ({len(hindi_translation)} chars)")
+        # Use shared translation function
+        from src.utils.translation_utils import translate_text_with_ollama
         
-        # Clean up translation (remove prefixes)
-        logger.info(f"🧹 [Page {page_num}] Step 4: Cleaning up translation text...")
-        prefixes_to_remove = [
-            "Hindi translation:", "Translation:", "Here is the translation:",
-            "The Hindi translation is:", "हिंदी अनुवाद:", "अनुवाद:",
-            "Hindi Translation:", "TRANSLATION:"
-        ]
-        for prefix in prefixes_to_remove:
-            if hindi_translation.lower().startswith(prefix.lower()):
-                hindi_translation = hindi_translation[len(prefix):].strip()
-        logger.info(f"✅ [Page {page_num}] Step 4 completed: Translation cleaned ({len(hindi_translation)} chars)")
+        logger.info(f"📝 [Page {page_num}] Step 3: Calling Ollama for translation (may take 10-30s)...")
+        translate_start = time_module.time()
+        hindi_translation = translate_text_with_ollama(
+            llm=llm,
+            english_text=english_text,
+            use_refinement=request.use_refinement,
+            page_display=f"Page {page_num}"
+        )
+        translate_time = time_module.time() - translate_start
+        logger.info(f"✅ [Page {page_num}] Step 3 completed: Translation in {translate_time:.2f}s ({len(hindi_translation)} chars)")
         
         # Save translation
         logger.info(f"💾 [Page {page_num}] Step 5: Saving translation to database...")

@@ -909,10 +909,17 @@ with col_auto2:
         
         // Function to close progress dialog
         function closeProgressDialog() {{
+            console.log('🔒 Closing progress dialog');
+            stopPolling(); // Make sure polling is stopped
             const el = getElement('auto_translate_progress');
             if (el) {{
                 el.style.display = 'none';
+                console.log('✅ Progress dialog hidden');
             }}
+            // Reload page to show updated translations
+            setTimeout(() => {{
+                window.location.reload();
+            }}, 500);
         }}
         
         // Function to resume a stuck translation job
@@ -1060,7 +1067,11 @@ with col_auto2:
             const completed = progress.completed_pages || 0;
             const failed = progress.failed_pages || 0;
             const total = progress.total_pages || totalPages;
-            const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+            // Calculate percent - if status is completed, always show 100%
+            let percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+            if (progress.status === 'completed') {{
+                percent = 100; // Force 100% when completed
+            }}
             const avgTime = progress.avg_time_per_page || 0;
             const estTime = progress.estimated_time_remaining || 0;
             
@@ -1189,17 +1200,22 @@ with col_auto2:
                         if (data && data.job_id) {{
                             jobId = data.job_id;
                             updateProgress(data);
-                            isPolling = true;
-                            if (data.status === 'running' || data.status === 'pending') {{
-                                pollInterval = setTimeout(pollJobProgress, 1000);
+                            
+                            // Check if job is completed or failed
+                            if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {{
+                                console.log('✅ Job completed/failed/cancelled, stopping polling');
+                                stopPolling();
+                                // Don't auto-reload - let user click Close button
                             }} else if (data.status === 'stuck') {{
                                 // Don't poll for stuck jobs - wait for user to resume
                                 stopPolling();
+                            }} else if (data.status === 'running' || data.status === 'pending') {{
+                                // Continue polling for running/pending jobs
+                                isPolling = true;
+                                pollInterval = setTimeout(pollJobProgress, 1000);
                             }} else {{
+                                // Unknown status, stop polling
                                 stopPolling();
-                                if (data.status === 'completed') {{
-                                    setTimeout(() => window.location.reload(), 3000);
-                                }}
                             }}
                         }} else {{
                             stopPolling();
@@ -1223,16 +1239,21 @@ with col_auto2:
                     }})
                     .then(data => {{
                         updateProgress(data);
-                        if (data.status === 'running' || data.status === 'pending') {{
-                            pollInterval = setTimeout(pollJobProgress, 1000);
+                        
+                        // Check if job is completed or failed
+                        if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {{
+                            console.log('✅ Job completed/failed/cancelled, stopping polling');
+                            stopPolling();
+                            // Don't auto-reload - let user click Close button
                         }} else if (data.status === 'stuck') {{
                             // Don't poll for stuck jobs - wait for user to resume
                             stopPolling();
+                        }} else if (data.status === 'running' || data.status === 'pending') {{
+                            // Continue polling for running/pending jobs
+                            pollInterval = setTimeout(pollJobProgress, 1000);
                         }} else {{
+                            // Unknown status, stop polling
                             stopPolling();
-                            if (data.status === 'completed') {{
-                                setTimeout(() => window.location.reload(), 3000);
-                            }}
                         }}
                     }})
                     .catch(error => {{
@@ -1889,6 +1910,213 @@ with col_right:
             st.info("👁️ Preview mode: Showing formatted version")
         else:
             st.info("✏️ Edit mode: Type your translation here")
+    
+    # Translate Current Page button
+    col_translate_btn, col_translate_info = st.columns([1, 3])
+    with col_translate_btn:
+        translate_page_link_id = f"translate_page_link_{book_id}_{current_page}"
+        translate_page_func_name = f"translateCurrentPage_{book_id}_{current_page}"
+        
+        translate_page_html = f"""
+        <div>
+        <script>
+        (function() {{
+            const API_BASE = 'http://127.0.0.1:8000';
+            const bookId = {book_id};
+            const pageNumber = {current_page};
+            
+            function getElement(id) {{
+                let el = document.getElementById(id);
+                if (el) return el;
+                if (window.parent && window.parent !== window) {{
+                    try {{
+                        el = window.parent.document.getElementById(id);
+                        if (el) return el;
+                    }} catch(e) {{
+                        console.log('Cannot access parent:', e);
+                    }}
+                }}
+                return null;
+            }}
+            
+            function {translate_page_func_name}(e) {{
+                if (e) {{
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                }}
+                
+                const translateLink = getElement('{translate_page_link_id}');
+                if (!translateLink) {{
+                    console.error('Translate link not found');
+                    return false;
+                }}
+                
+                // Show loading state
+                const originalText = translateLink.textContent;
+                translateLink.textContent = '⏳ Translating...';
+                translateLink.style.pointerEvents = 'none';
+                translateLink.style.color = '#ff9800';
+                
+                // Get settings from Streamlit inputs
+                let ollamaModel = 'aya:8b';
+                let ollamaUrl = 'http://localhost:11434';
+                let useRefinement = true;
+                let temperature = 0.2;
+                
+                // Find Ollama Model input
+                const modelInputs = document.querySelectorAll('input[type="text"]');
+                for (let input of modelInputs) {{
+                    const closest = input.closest('.stTextInput');
+                    const label = closest ? (closest.querySelector('label') ? closest.querySelector('label').textContent : '') : '';
+                    if (label.includes('Ollama Model') || input.value.includes('aya')) {{
+                        ollamaModel = input.value || 'aya:8b';
+                        break;
+                    }}
+                }}
+                
+                // Find Ollama Base URL input
+                for (let input of modelInputs) {{
+                    const closest = input.closest('.stTextInput');
+                    const label = closest ? (closest.querySelector('label') ? closest.querySelector('label').textContent : '') : '';
+                    if (label.includes('Ollama Base URL') || (input.value.includes('localhost') && input.value.includes('11434'))) {{
+                        ollamaUrl = input.value || 'http://localhost:11434';
+                        break;
+                    }}
+                }}
+                
+                // Find refinement checkbox
+                const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+                for (let checkbox of checkboxes) {{
+                    const labelEl = checkbox.closest('label');
+                    const label = labelEl ? labelEl.textContent : '';
+                    if (label.includes('Two-Step') || label.includes('Refinement')) {{
+                        useRefinement = checkbox.checked !== false;
+                        break;
+                    }}
+                }}
+                
+                // Find temperature slider
+                const sliders = document.querySelectorAll('input[type="range"]');
+                for (let slider of sliders) {{
+                    const closest = slider.closest('.stSlider');
+                    const label = closest ? (closest.querySelector('label') ? closest.querySelector('label').textContent : '') : '';
+                    if (label.includes('Temperature')) {{
+                        temperature = parseFloat(slider.value || '0.2');
+                        break;
+                    }}
+                }}
+                
+                // Call API to translate page
+                fetch(API_BASE + '/api/pdf/auto-translate-page', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                        book_id: bookId,
+                        page_number: pageNumber,
+                        ollama_model: ollamaModel,
+                        ollama_base_url: ollamaUrl,
+                        use_refinement: useRefinement,
+                        temperature: temperature
+                    }})
+                }})
+                .then(response => {{
+                    if (!response.ok) {{
+                        throw new Error('HTTP error! status: ' + response.status);
+                    }}
+                    return response.json();
+                }})
+                .then(data => {{
+                    if (data.success && data.translated_text !== undefined) {{
+                        // Update the translation textarea
+                        const textareaId = 'translation_textarea_{book_id}_{current_page}';
+                        const textarea = getElement(textareaId);
+                        if (textarea) {{
+                            textarea.value = data.translated_text;
+                            // Trigger input and change events to update Streamlit
+                            const inputEvent = new Event('input', {{ bubbles: true }});
+                            const changeEvent = new Event('change', {{ bubbles: true }});
+                            textarea.dispatchEvent(inputEvent);
+                            textarea.dispatchEvent(changeEvent);
+                            
+                            // Also try to update Streamlit session state via custom event
+                            const customEvent = new CustomEvent('streamlit:setComponentValue', {{
+                                detail: {{ value: data.translated_text }},
+                                bubbles: true
+                            }});
+                            textarea.dispatchEvent(customEvent);
+                        }}
+                        
+                        translateLink.textContent = '✅ Translated!';
+                        translateLink.style.color = '#28a745';
+                        setTimeout(() => {{
+                            translateLink.textContent = originalText;
+                            translateLink.style.color = '#1f77b4';
+                            translateLink.style.pointerEvents = 'auto';
+                            // Reload page to ensure Streamlit state is updated
+                            window.location.reload();
+                        }}, 1500);
+                    }} else {{
+                        throw new Error(data.message || 'Translation failed');
+                    }}
+                }})
+                .catch(error => {{
+                    console.error('Translation error:', error);
+                    translateLink.textContent = '❌ Error';
+                    translateLink.style.color = '#f44336';
+                    alert('Translation failed: ' + error.message);
+                    setTimeout(() => {{
+                        translateLink.textContent = originalText;
+                        translateLink.style.color = '#1f77b4';
+                        translateLink.style.pointerEvents = 'auto';
+                    }}, 3000);
+                }});
+                
+                return false;
+            }}
+            
+            // Make function globally accessible
+            window.{translate_page_func_name} = {translate_page_func_name};
+            
+            // Attach event listener
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', function() {{
+                    const link = getElement('{translate_page_link_id}');
+                    if (link) {{
+                        link.addEventListener('click', function(e) {{
+                            e.preventDefault();
+                            e.stopPropagation();
+                            {translate_page_func_name}(e);
+                            return false;
+                        }}, true);
+                    }}
+                }});
+            }} else {{
+                const link = getElement('{translate_page_link_id}');
+                if (link) {{
+                    link.addEventListener('click', function(e) {{
+                        e.preventDefault();
+                        e.stopPropagation();
+                        {translate_page_func_name}(e);
+                        return false;
+                    }}, true);
+                }}
+            }}
+        }})();
+        </script>
+        <a href="javascript:void(0)" 
+           id="{translate_page_link_id}" 
+           onclick="event.preventDefault(); event.stopPropagation(); return {translate_page_func_name}(event);"
+           style="text-decoration: none; color: #1f77b4; cursor: pointer; font-size: 0.9em; display: inline-block; font-weight: bold; padding: 8px 16px; border: 2px solid #1f77b4; border-radius: 4px; background-color: #f0f8ff;">
+           🔄 Translate This Page
+        </a>
+        </div>
+        """
+        from streamlit.components.v1 import html
+        html(translate_page_html, height=50)
+    
+    with col_translate_info:
+        st.caption("💡 Uses the same translation settings as Auto Translate")
     
     # Load existing translation if available
     translation_data = books_db.get_translation(book_id, current_page)

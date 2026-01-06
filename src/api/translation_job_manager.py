@@ -55,8 +55,9 @@ class TranslationJobManager:
                 'failed_pages': 0,
                 'page_times': [],
                 'start_time': time.time(),
-                'parallel_workers': parallel_workers,
-                'previous_avg_time': 0  # No previous data for new jobs
+                'last_start_time': time.time(),  # Track when this session started
+                'total_processing_time': 0.0,  # Cumulative processing time (excluding stopped time)
+                'parallel_workers': parallel_workers
             }
             
             # Start background thread
@@ -87,9 +88,16 @@ class TranslationJobManager:
         logger.info(f"🔄 [Job {job_id}] Parameters: book_id={book_id}, pages={total_pages}, workers={parallel_workers}")
         
         try:
-            # Update job status to 'running' at the start
+            # Update job status to 'running' at the start and record start time
             logger.info(f"📝 [Job {job_id}] Updating job status to 'running' in database...")
-            self.books_db.update_job_progress(job_id, status='running')
+            from datetime import datetime
+            current_time = datetime.now()
+            self.books_db.update_job_progress(job_id, status='running', last_start_time=current_time)
+            
+            # Update in-memory stats with start time
+            with self.lock:
+                if job_id in self.job_stats:
+                    self.job_stats[job_id]['last_start_time'] = time.time()
             logger.info(f"✅ [Job {job_id}] Job status updated to 'running'")
             
             logger.info(f"📦 [Job {job_id}] Importing required modules...")
@@ -171,79 +179,19 @@ class TranslationJobManager:
                         
                         return {'success': True, 'page_num': page_num, 'blank': True}
                     
-                    # Translate
-                    if use_refinement:
-                        # Two-step translation
-                        logger.info(f"🔄 [Job {job_id}] [Page {page_display}] Starting two-step translation (Step 1: Initial translation)...")
-                        initial_prompt = f"""Translate the following English text to Hindi. Focus on accuracy and meaning.
-
-English text:
-{english_text}
-
-Provide the Hindi translation:"""
-                        initial_start = time.time()
-                        initial_translation = llm.invoke(initial_prompt).strip()
-                        initial_time = time.time() - initial_start
-                        logger.info(f"✅ [Job {job_id}] [Page {page_display}] Initial translation completed in {initial_time:.2f}s (length: {len(initial_translation)} chars)")
-                        
-                        logger.info(f"🔄 [Job {job_id}] [Page {page_display}] Starting Step 2: Refinement...")
-                        refinement_prompt = f"""You are refining a Hindi translation to make it more natural, fluent, and accurate.
-
-ORIGINAL ENGLISH TEXT:
-{english_text}
-
-CURRENT HINDI TRANSLATION:
-{initial_translation}
-
-TASK: Refine this translation to:
-1. Make it sound more natural and fluent in Hindi
-2. Improve word choice and expressions
-3. Ensure proper grammar and sentence structure
-4. Enhance readability and flow
-5. Fix any awkward phrasings or literal translations
-
-Output ONLY the refined Hindi translation, no explanations:"""
-                        refinement_start = time.time()
-                        logger.info(f"🔄 [Job {job_id}] [Page {page_display}] Calling Ollama for refinement...")
-                        try:
-                            hindi_translation = llm.invoke(refinement_prompt).strip()
-                            refinement_time = time.time() - refinement_start
-                            logger.info(f"✅ [Job {job_id}] [Page {page_display}] Refinement completed in {refinement_time:.2f}s (length: {len(hindi_translation)} chars)")
-                        except Exception as refine_error:
-                            refinement_time = time.time() - refinement_start
-                            logger.error(f"❌ [Job {job_id}] [Page {page_display}] Refinement FAILED after {refinement_time:.2f}s: {refine_error}", exc_info=True)
-                            raise  # Re-raise to be caught by outer exception handler
-                    else:
-                        # Single-step translation
-                        logger.info(f"🔄 [Job {job_id}] [Page {page_display}] Starting single-step translation...")
-                        translation_prompt = f"""You are a professional translator with native-level proficiency in both English and Hindi.
-
-TASK: Translate the following English text into natural, fluent Hindi that reads as if it were originally written in Hindi.
-
-ORIGINAL ENGLISH TEXT:
-{english_text}
-
-TRANSLATION REQUIREMENTS:
-- Output ONLY the Hindi translation
-- No explanations, notes, or additional text
-- Preserve paragraph breaks and formatting
-- Use proper Devanagari script
-
-Hindi Translation:"""
-                        translation_start = time.time()
-                        hindi_translation = llm.invoke(translation_prompt).strip()
-                        translation_time = time.time() - translation_start
-                        logger.info(f"✅ [Job {job_id}] [Page {page_display}] Translation completed in {translation_time:.2f}s (length: {len(hindi_translation)} chars)")
+                    # Use shared translation function
+                    from src.utils.translation_utils import translate_text_with_ollama
                     
-                    # Clean up translation
-                    prefixes_to_remove = [
-                        "Hindi translation:", "Translation:", "Here is the translation:",
-                        "The Hindi translation is:", "हिंदी अनुवाद:", "अनुवाद:",
-                        "Hindi Translation:", "TRANSLATION:"
-                    ]
-                    for prefix in prefixes_to_remove:
-                        if hindi_translation.lower().startswith(prefix.lower()):
-                            hindi_translation = hindi_translation[len(prefix):].strip()
+                    logger.info(f"🔄 [Job {job_id}] [Page {page_display}] Starting translation...")
+                    translation_start = time.time()
+                    hindi_translation = translate_text_with_ollama(
+                        llm=llm,
+                        english_text=english_text,
+                        use_refinement=use_refinement,
+                        page_display=f"Job {job_id} [Page {page_display}/{total_pages}]"
+                    )
+                    translation_time = time.time() - translation_start
+                    logger.info(f"✅ [Job {job_id}] [Page {page_display}] Translation completed in {translation_time:.2f}s (length: {len(hindi_translation)} chars)")
                     
                     # Save translation
                     logger.info(f"💾 [Job {job_id}] [Page {page_display}] Saving translation to database...")
@@ -408,15 +356,19 @@ Hindi Translation:"""
             with self.lock:
                 stats = self.job_stats.get(job_id)
                 if stats:
-                    total_time = time.time() - stats['start_time']
+                    # Update total processing time (add this session's time)
+                    session_time = time.time() - stats.get('last_start_time', time.time())
+                    stats['total_processing_time'] = stats.get('total_processing_time', 0.0) + session_time
+                    
                     completed = stats.get('completed_pages', 0)
                     failed = stats.get('failed_pages', 0)
                     page_times_count = len(stats.get('page_times', []))
+                    total_processing_time = stats.get('total_processing_time', 0.0)
                     logger.info(f"📊 [Job {job_id}] Final stats from memory:")
                     logger.info(f"📊 [Job {job_id}]   - Completed pages: {completed}")
                     logger.info(f"📊 [Job {job_id}]   - Failed pages: {failed}")
                     logger.info(f"📊 [Job {job_id}]   - Page times recorded: {page_times_count}")
-                    logger.info(f"📊 [Job {job_id}]   - Total time: {total_time:.2f}s")
+                    logger.info(f"📊 [Job {job_id}]   - Total processing time: {total_processing_time:.2f}s")
                     
                     # Final progress update
                     logger.info(f"💾 [Job {job_id}] Performing final progress update in database...")
@@ -453,6 +405,15 @@ Hindi Translation:"""
             logger.error(f"❌ [Job {job_id}] Error: {str(e)}", exc_info=True)
             logger.error(f"❌ [Job {job_id}] Thread execution time before failure: {thread_total_time:.2f}s")
             
+            # Update total processing time before marking as failed
+            with self.lock:
+                stats = self.job_stats.get(job_id)
+                if stats and 'last_start_time' in stats:
+                    session_time = time.time() - stats['last_start_time']
+                    stats['total_processing_time'] = stats.get('total_processing_time', 0.0) + session_time
+                    # Save updated stats to database
+                    self._update_job_progress(job_id)
+            
             try:
                 logger.info(f"💾 [Job {job_id}] Marking job as 'failed' in database...")
                 self.books_db.complete_job(job_id, 'failed', str(e))
@@ -476,41 +437,68 @@ Hindi Translation:"""
         if not stats:
             return
         
-        # Calculate average time per page (only from pages that took time)
+        # Get all page times (from current session and previous sessions)
         page_times = stats.get('page_times', [])
-        if page_times:
+        previous_page_times = stats.get('previous_page_times', [])
+        
+        # Combine previous and current page times
+        all_page_times = previous_page_times + page_times
+        
+        # Also check database for any additional page times (in case database has more recent data)
+        job = self.books_db.get_translation_job(job_id)
+        if job and job.get('page_times'):
+            import json
+            try:
+                db_page_times = json.loads(job['page_times'])
+                # Use database times if they're longer (more up-to-date), otherwise use combined
+                if len(db_page_times) >= len(all_page_times):
+                    all_page_times = db_page_times
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Calculate average time per page from ALL processed pages
+        # Only count pages that actually took time to process (exclude very short times)
+        if all_page_times:
             # Filter out very short times (less than 0.1s) which might be blank pages or errors
-            meaningful_times = [t for t in page_times if t >= 0.1]
+            meaningful_times = [t for t in all_page_times if t >= 0.1]
             if meaningful_times:
+                # Calculate average from meaningful processing times
                 avg_time = sum(meaningful_times) / len(meaningful_times)
             else:
                 # If all times are very short, use the overall average
-                avg_time = sum(page_times) / len(page_times) if page_times else 0
+                avg_time = sum(all_page_times) / len(all_page_times) if all_page_times else 0
         else:
-            # If no page times yet, use previous average if available (for resumed jobs)
-            avg_time = stats.get('previous_avg_time', 0)
+            # No page times yet
+            avg_time = 0
         
-        # Calculate estimated time remaining
+        # Calculate estimated time remaining based on average from processed pages
         completed = stats.get('completed_pages', 0) + stats.get('failed_pages', 0)
         total_pages = stats.get('total_pages', 0)
         remaining = max(0, total_pages - completed)
         
-        # Only calculate estimate if we have meaningful timing data
+        # Only calculate estimate if we have meaningful timing data and remaining pages
         if avg_time > 0 and remaining > 0:
             est_time_remaining = avg_time * remaining
         else:
             est_time_remaining = 0
         
-        # Update database
+        # Get total processing time from stats (already includes previous sessions)
+        # When job is running, we'll calculate it dynamically in get_job_progress
+        # Here we just store the base value (from previous sessions)
+        total_processing_time = stats.get('total_processing_time', 0.0)
+        
+        # Update database with all stats including page_times
         self.books_db.update_job_progress(
             job_id=job_id,
             completed_pages=stats.get('completed_pages', 0),
             failed_pages=stats.get('failed_pages', 0),
             avg_time_per_page=avg_time,
-            estimated_time_remaining=est_time_remaining
+            estimated_time_remaining=est_time_remaining,
+            page_times=all_page_times,  # Store all page times (current + previous)
+            total_processing_time=total_processing_time
         )
         
-        logger.debug(f"📊 [Job {job_id}] Progress update: completed={stats.get('completed_pages', 0)}, failed={stats.get('failed_pages', 0)}, avg_time={avg_time:.2f}s, est_remaining={est_time_remaining:.2f}s")
+        logger.debug(f"📊 [Job {job_id}] Progress update: completed={stats.get('completed_pages', 0)}, failed={stats.get('failed_pages', 0)}, avg_time={avg_time:.2f}s, est_remaining={est_time_remaining:.2f}s, total_processing_time={total_processing_time:.2f}s")
     
     def get_job_progress(self, job_id: int) -> Optional[Dict]:
         """Get current progress for a job."""
@@ -524,26 +512,50 @@ Hindi Translation:"""
         completed_pages = stats.get('completed_pages', job.get('completed_pages', 0))
         failed_pages = stats.get('failed_pages', job.get('failed_pages', 0))
         
-        # Calculate average time from in-memory stats if available
-        page_times = stats.get('page_times', [])
-        if page_times:
+        # Get all page times (from current session and database)
+        current_page_times = stats.get('page_times', [])
+        all_page_times = current_page_times
+        
+        # Load previous page times from database
+        if job.get('page_times'):
+            import json
+            try:
+                previous_times = json.loads(job['page_times'])
+                # Combine with current session times
+                all_page_times = previous_times + current_page_times
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Calculate average time from ALL processed pages
+        if all_page_times:
             # Filter out very short times (less than 0.1s) which might be blank pages or errors
-            meaningful_times = [t for t in page_times if t >= 0.1]
+            meaningful_times = [t for t in all_page_times if t >= 0.1]
             if meaningful_times:
                 avg_time = sum(meaningful_times) / len(meaningful_times)
             else:
                 # If all times are very short, use the overall average
-                avg_time = sum(page_times) / len(page_times) if page_times else 0
+                avg_time = sum(all_page_times) / len(all_page_times) if all_page_times else 0
         else:
-            # Use database value or previous average
-            avg_time = job.get('avg_time_per_page') or stats.get('previous_avg_time', 0) or 0
+            # Use database value if available
+            avg_time = job.get('avg_time_per_page') or 0
         
-        # Calculate estimated time remaining
+        # Calculate estimated time remaining based on average from processed pages
         remaining = max(0, job['total_pages'] - completed_pages - failed_pages)
         if avg_time > 0 and remaining > 0:
             est_time_remaining = avg_time * remaining
         else:
             est_time_remaining = job.get('estimated_time_remaining') or 0
+        
+        # Calculate total processing time (including current session if running)
+        # Base time from database (previous sessions)
+        base_processing_time = job.get('total_processing_time') or 0.0
+        
+        # Add current session time if job is running
+        if job_id in self.active_jobs and 'last_start_time' in stats:
+            session_elapsed = time.time() - stats['last_start_time']
+            total_processing_time = base_processing_time + session_elapsed
+        else:
+            total_processing_time = base_processing_time
         
         return {
             'success': True,
@@ -555,6 +567,7 @@ Hindi Translation:"""
             'failed_pages': failed_pages,
             'avg_time_per_page': avg_time,
             'estimated_time_remaining': est_time_remaining,
+            'total_processing_time': total_processing_time,
             'started_at': job.get('started_at'),
             'completed_at': job.get('completed_at'),
             'error_message': job.get('error_message')
@@ -600,25 +613,39 @@ Hindi Translation:"""
             # Initialize job stats with current progress from database
             completed_pages = job.get('completed_pages', 0)
             failed_pages = job.get('failed_pages', 0)
-            # Preserve existing avg_time_per_page if available for better estimates
-            existing_avg_time = job.get('avg_time_per_page', 0)
-            logger.info(f"📊 [Job {job_id}] Resuming with: completed={completed_pages}, failed={failed_pages}, avg_time={existing_avg_time:.2f}s")
+            total_processing_time = job.get('total_processing_time', 0.0) or 0.0
+            
+            # Load previous page times from database to preserve stats
+            previous_page_times = []
+            if job.get('page_times'):
+                import json
+                try:
+                    previous_page_times = json.loads(job['page_times'])
+                    logger.info(f"📊 [Job {job_id}] Loaded {len(previous_page_times)} previous page times from database")
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"⚠️ [Job {job_id}] Could not parse page_times from database: {e}")
+            
+            logger.info(f"📊 [Job {job_id}] Resuming with: completed={completed_pages}, failed={failed_pages}, total_processing_time={total_processing_time:.2f}s, previous_page_times={len(previous_page_times)}")
             
             self.job_stats[job_id] = {
                 'book_id': job['book_id'],
                 'total_pages': job['total_pages'],
                 'completed_pages': completed_pages,
                 'failed_pages': failed_pages,
-                'page_times': [],  # Start fresh for new session, but use existing avg for estimates
+                'page_times': [],  # Start fresh for this session, but we'll combine with previous when calculating
+                'previous_page_times': previous_page_times,  # Store previous times for calculation
                 'start_time': time.time(),
-                'parallel_workers': job.get('parallel_workers', 10),
-                'previous_avg_time': existing_avg_time  # Store for fallback calculation
+                'last_start_time': time.time(),  # Track when this resume session started
+                'total_processing_time': total_processing_time,  # Preserve cumulative processing time
+                'parallel_workers': job.get('parallel_workers', 10)
             }
-            logger.info(f"✅ [Job {job_id}] Job stats initialized for resume")
+            logger.info(f"✅ [Job {job_id}] Job stats initialized for resume (preserving previous stats)")
             
-            # Update job status to 'running'
+            # Update job status to 'running' and record start time
             logger.info(f"💾 [Job {job_id}] Updating job status to 'running' in database...")
-            self.books_db.update_job_progress(job_id, status='running')
+            from datetime import datetime
+            current_time = datetime.now()
+            self.books_db.update_job_progress(job_id, status='running', last_start_time=current_time)
             logger.info(f"✅ [Job {job_id}] Job status updated to 'running'")
             
             # Restart the job
@@ -650,6 +677,14 @@ Hindi Translation:"""
         """Cancel a running job."""
         with self.lock:
             if job_id in self.active_jobs:
+                # Update total processing time before cancelling
+                stats = self.job_stats.get(job_id)
+                if stats and 'last_start_time' in stats:
+                    session_time = time.time() - stats['last_start_time']
+                    stats['total_processing_time'] = stats.get('total_processing_time', 0.0) + session_time
+                    # Save updated stats to database
+                    self._update_job_progress(job_id)
+                
                 # Mark as cancelled in database
                 self.books_db.complete_job(job_id, 'cancelled')
                 # Note: We can't actually stop the thread, but we mark it as cancelled

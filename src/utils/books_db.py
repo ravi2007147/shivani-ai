@@ -120,6 +120,39 @@ class BooksDBManager:
             else:
                 logger.warning(f"Could not add parallel_workers column: {e}")
         
+        # Add page_times column to store JSON array of page processing times (migration)
+        try:
+            cursor.execute("ALTER TABLE translation_jobs ADD COLUMN page_times TEXT")
+            conn.commit()
+            logger.info("Added page_times column to translation_jobs table")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Could not add page_times column: {e}")
+        
+        # Add total_processing_time column to track cumulative processing time (migration)
+        try:
+            cursor.execute("ALTER TABLE translation_jobs ADD COLUMN total_processing_time REAL DEFAULT 0")
+            conn.commit()
+            logger.info("Added total_processing_time column to translation_jobs table")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Could not add total_processing_time column: {e}")
+        
+        # Add last_start_time column to track when job was last started (migration)
+        try:
+            cursor.execute("ALTER TABLE translation_jobs ADD COLUMN last_start_time TIMESTAMP")
+            conn.commit()
+            logger.info("Added last_start_time column to translation_jobs table")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Could not add last_start_time column: {e}")
+        
         conn.commit()
         conn.close()
     
@@ -559,7 +592,10 @@ class BooksDBManager:
         failed_pages: Optional[int] = None,
         avg_time_per_page: Optional[float] = None,
         estimated_time_remaining: Optional[float] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        page_times: Optional[List[float]] = None,
+        total_processing_time: Optional[float] = None,
+        last_start_time: Optional[datetime] = None
     ) -> bool:
         """Update progress for a translation job.
         
@@ -570,10 +606,14 @@ class BooksDBManager:
             avg_time_per_page: Average time per page in seconds
             estimated_time_remaining: Estimated time remaining in seconds
             status: Job status (pending, running, completed, failed)
+            page_times: List of page processing times in seconds
+            total_processing_time: Total cumulative processing time in seconds
+            last_start_time: Timestamp when job was last started
             
         Returns:
             True if update was successful, False otherwise
         """
+        import json
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -600,6 +640,18 @@ class BooksDBManager:
             if status is not None:
                 updates.append("status = ?")
                 params.append(status)
+            
+            if page_times is not None:
+                updates.append("page_times = ?")
+                params.append(json.dumps(page_times))
+            
+            if total_processing_time is not None:
+                updates.append("total_processing_time = ?")
+                params.append(total_processing_time)
+            
+            if last_start_time is not None:
+                updates.append("last_start_time = ?")
+                params.append(last_start_time)
             
             if not updates:
                 return False
